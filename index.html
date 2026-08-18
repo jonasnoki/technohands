@@ -1,0 +1,1021 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>fingertips</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #0b0b10;
+    color: #eee;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    overflow: hidden;
+  }
+  #stage {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+  }
+  video, canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1); /* mirror */
+  }
+  video { visibility: hidden; }
+  #rack {
+    position: absolute;
+    left: 50%;
+    bottom: 22px;
+    transform: translateX(-50%);
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    max-width: calc(100vw - 36px);
+    z-index: 15;
+    pointer-events: none;
+    text-shadow: 0 1px 4px rgba(0,0,0,.85);
+  }
+  /* the cycle order is left-to-right, so the rack doubles as the map of what
+     flipping your hand steps through */
+  .slot {
+    min-width: 96px;
+    padding: 8px 12px;
+    border-radius: 11px;
+    border: 1px solid rgba(255,255,255,.1);
+    background: rgba(10,10,16,.5);
+    backdrop-filter: blur(6px);
+    text-align: center;
+    opacity: .55;
+    transition: border-color .2s linear, background .2s linear, opacity .2s linear;
+  }
+  .slot.active { background: rgba(10,10,16,.82); opacity: 1; }
+  .slotName {
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    opacity: .9;
+  }
+  .slotState {
+    margin-top: 5px;
+    font-size: 11.5px;
+    font-weight: 600;
+    height: 14px;
+    opacity: .8;
+  }
+  #hud {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 14px 18px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    pointer-events: none;
+    z-index: 10;
+    text-shadow: 0 1px 4px rgba(0,0,0,.8);
+  }
+  #hud h1 {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0 0 4px 0;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    opacity: .85;
+  }
+  #hud p {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+    opacity: .7;
+    max-width: 420px;
+  }
+  #status {
+    font-size: 12.5px;
+    opacity: .85;
+    text-align: right;
+  }
+  #startOverlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0b0b10;
+    z-index: 20;
+    flex-direction: column;
+    gap: 14px;
+    text-align: center;
+    padding: 20px;
+  }
+  #startOverlay button {
+    background: #6c5ce7;
+    color: white;
+    border: none;
+    padding: 14px 28px;
+    border-radius: 999px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #startOverlay button:hover { background: #7d6bf0; }
+  #startOverlay small { opacity: .55; max-width: 340px; line-height: 1.5; }
+  .hudKey {
+    margin-top: 10px !important;
+    font-size: 11.5px !important;
+    opacity: .45 !important;
+    letter-spacing: .03em;
+  }
+  .hudKey kbd {
+    background: rgba(255,255,255,.14);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-family: inherit;
+    font-size: 11px;
+  }
+  /* performance mode: everything fades but the video and the tracked hands */
+  #hud, #rack {
+    transition: opacity .25s linear;
+  }
+  body.chrome-hidden #hud,
+  body.chrome-hidden #rack {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .noteBadge {
+    position: absolute;
+    z-index: 10;
+    pointer-events: none;
+    font-size: 13px;
+    font-weight: 700;
+    padding: 4px 9px;
+    border-radius: 8px;
+    background: rgba(0,0,0,.45);
+    backdrop-filter: blur(2px);
+    transform: translate(-50%, -140%);
+    transition: opacity .1s linear;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" playsinline></video>
+  <canvas id="canvas"></canvas>
+  <div id="rack"></div>
+  <div id="hud">
+    <div>
+      <h1>fingertips</h1>
+      <p>Stand anywhere, raise a hand. <strong>Turn your hand over</strong> to step to the next instrument &mdash; each hand cycles the row below independently, so everyone picks their own. A closed fist means silence. Any number of people can share one instrument. One 132bpm clock, so nothing drifts out of time.</p>
+      <p class="hudKey"><kbd>space</kbd> &mdash; hide interface</p>
+    </div>
+    <div id="status">loading&hellip;</div>
+  </div>
+  <div id="startOverlay">
+    <button id="startBtn">Start camera + audio</button>
+    <small>Runs entirely in your browser. Nothing is recorded or sent anywhere.</small>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js" crossorigin="anonymous"></script>
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx2d = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const startOverlay = document.getElementById('startOverlay');
+const startBtn = document.getElementById('startBtn');
+
+// ---------------------------------------------------------------- audio graph
+// Everything funnels into masterBus, then glue compression and a limiter. The
+// global filter/delay/reverb that used to sit here went away with the FX hand —
+// each voice now carries its own effects instead.
+const limiter = new Tone.Limiter(-1).toDestination();
+const masterComp = new Tone.Compressor({ threshold: -18, ratio: 4 }).connect(limiter);
+const masterBus = new Tone.Gain().connect(masterComp);
+
+// drums share a filter so the drum hand's height can sweep the kit as a group
+const drumFilter = new Tone.Filter(9000, 'lowpass').connect(masterBus);
+
+const kick = new Tone.MembraneSynth({
+  // long decay and a deep pitch sweep — the kick is meant to boom, not click
+  pitchDecay: 0.035,
+  octaves: 7,
+  envelope: { attack: 0.001, decay: 0.5, sustain: 0, release: 0.2 },
+}).connect(drumFilter);
+kick.volume.value = -4;
+
+const hihatHighpass = new Tone.Filter(7000, 'highpass').connect(drumFilter);
+const hihat = new Tone.NoiseSynth({
+  noise: { type: 'white' },
+  envelope: { attack: 0.001, decay: 0.03, sustain: 0 },
+}).connect(hihatHighpass);
+hihat.volume.value = -18;
+
+// The signature Berghain low end: a sub hit drowned in long reverb and lowpassed
+// hard, so what you hear is the rumbling tail rather than the transient. Routed
+// around drumFilter so the drum hand's height sweep can't choke the low end.
+const rumbleReverb = new Tone.Reverb({ decay: 6, preDelay: 0.02, wet: 0.9 }).connect(masterBus);
+const rumbleLowpass = new Tone.Filter(170, 'lowpass').connect(rumbleReverb);
+const rumble = new Tone.MembraneSynth({
+  pitchDecay: 0.09,
+  octaves: 3,
+  envelope: { attack: 0.002, decay: 0.9, sustain: 0.02, release: 1.4 },
+}).connect(rumbleLowpass);
+rumble.volume.value = -3;
+
+// industrial metallic hit — inharmonic and dry, for the clanking factory feel
+const clankFilter = new Tone.Filter(2600, 'bandpass').connect(drumFilter);
+const clank = new Tone.MetalSynth({
+  frequency: 180,
+  envelope: { attack: 0.001, decay: 0.32, release: 0.1 },
+  harmonicity: 5.1,
+  modulationIndex: 32,
+  resonance: 4000,
+  octaves: 1.5,
+}).connect(clankFilter);
+clank.volume.value = -30; // MetalSynth is extremely hot by default
+
+// continuous noise wash, gated by the finger rather than step-triggered — a bed
+// that swells underneath everything instead of another rhythmic element
+const atmosGain = new Tone.Gain(0).connect(drumFilter);
+const atmosFilter = new Tone.AutoFilter({
+  frequency: 0.07, depth: 0.85, baseFrequency: 220, octaves: 3.5,
+}).connect(atmosGain);
+const atmos = new Tone.Noise('pink').connect(atmosFilter);
+
+// acid voice — filter Q and drive come from the fingertip polygon. Portamento
+// gives the 303 slide between notes; phaser and ping-pong delay add the swirl
+// and the off-grid echoes that make it feel unmoored.
+const acidDelay = new Tone.PingPongDelay({ delayTime: '8n.', feedback: 0.38, wet: 0.3 }).connect(masterBus);
+const acidPhaser = new Tone.Phaser({ frequency: 0.22, octaves: 3, baseFrequency: 400 }).connect(acidDelay);
+const melodyFilter = new Tone.Filter({ frequency: 800, type: 'lowpass', Q: 6 }).connect(acidPhaser);
+const melodyDist = new Tone.Distortion({ distortion: 0.4, wet: 0.15 }).connect(melodyFilter);
+const melodySynth = new Tone.MonoSynth({
+  oscillator: { type: 'sawtooth' },
+  portamento: 0.055,
+  envelope: { attack: 0.005, decay: 0.12, sustain: 0.05, release: 0.08 },
+  filterEnvelope: { attack: 0.005, decay: 0.15, sustain: 0.1, release: 0.1, baseFrequency: 200, octaves: 3 },
+}).connect(melodyDist);
+melodySynth.volume.value = -10;
+
+// Chord pad — not stabs. Detuned saws through a slow chorus and a long, very
+// wet reverb put it far behind the drums, and the slow attack means it swells
+// rather than hits, so it reads as atmosphere instead of a rhythmic part.
+const chordReverb = new Tone.Reverb({ decay: 8, preDelay: 0.05, wet: 0.55 }).connect(masterBus);
+const chordFilter = new Tone.Filter({ frequency: 900, type: 'lowpass', Q: 1.5 }).connect(chordReverb);
+const chordChorus = new Tone.Chorus({ frequency: 0.3, delayTime: 6, depth: 0.7, wet: 0.5 }).connect(chordFilter);
+const chordSynth = new Tone.PolySynth(Tone.Synth, {
+  oscillator: { type: 'fatsawtooth', count: 3, spread: 40 },
+  envelope: { attack: 0.6, decay: 1.2, sustain: 0.5, release: 2.5 },
+}).connect(chordChorus);
+chordSynth.volume.value = -24;
+
+// Whale song. The character is almost entirely in the glide — a long portamento
+// means every note bends into the next instead of stepping, which is what makes
+// a sine read as an animal rather than a test tone. Vibrato, a very slow chorus
+// and a 12-second reverb do the rest of the underwater work.
+const whaleReverb = new Tone.Reverb({ decay: 12, preDelay: 0.08, wet: 0.75 }).connect(masterBus);
+const whaleDelay = new Tone.FeedbackDelay({ delayTime: '4n.', feedback: 0.4, wet: 0.25 }).connect(whaleReverb);
+const whaleFilter = new Tone.Filter({ frequency: 900, type: 'lowpass', Q: 2 }).connect(whaleDelay);
+const whaleChorus = new Tone.Chorus({ frequency: 0.15, delayTime: 8, depth: 0.8, wet: 0.6 }).connect(whaleFilter);
+const whaleVibrato = new Tone.Vibrato({ frequency: 5.5, depth: 0.12 }).connect(whaleChorus);
+const whale = new Tone.MonoSynth({
+  oscillator: { type: 'sine' },
+  portamento: 0.9,
+  envelope: { attack: 1.2, decay: 0.5, sustain: 0.85, release: 3 },
+  filterEnvelope: { attack: 1, decay: 1, sustain: 0.7, release: 3, baseFrequency: 200, octaves: 2 },
+}).connect(whaleVibrato);
+whale.volume.value = -11;
+
+// ---------------------------------------------- second half of the cycle
+// A deliberately quieter counterpart to the four voices above — where those are
+// industrial and dense, these are sparse and wet. Same control scheme.
+
+// percussion: dry, small, clicky. Euclidean rather than hand-written patterns.
+const perc2Filter = new Tone.Filter(10000, 'lowpass').connect(masterBus);
+const sub2 = new Tone.MembraneSynth({
+  pitchDecay: 0.03, octaves: 5,
+  envelope: { attack: 0.001, decay: 0.34, sustain: 0 },
+}).connect(perc2Filter);
+sub2.volume.value = -6;
+
+const rim2High = new Tone.Filter(1800, 'bandpass').connect(perc2Filter);
+const rim2 = new Tone.NoiseSynth({
+  noise: { type: 'pink' }, envelope: { attack: 0.001, decay: 0.045, sustain: 0 },
+}).connect(rim2High);
+rim2.volume.value = -14;
+
+const tick2High = new Tone.Filter(9000, 'highpass').connect(perc2Filter);
+const tick2 = new Tone.NoiseSynth({
+  noise: { type: 'white' }, envelope: { attack: 0.001, decay: 0.018, sustain: 0 },
+}).connect(tick2High);
+tick2.volume.value = -22;
+
+const tom2 = new Tone.MembraneSynth({
+  pitchDecay: 0.05, octaves: 3,
+  envelope: { attack: 0.001, decay: 0.28, sustain: 0 },
+}).connect(perc2Filter);
+tom2.volume.value = -16;
+
+const clave2 = new Tone.MetalSynth({
+  frequency: 800, envelope: { attack: 0.001, decay: 0.09, release: 0.05 },
+  harmonicity: 3.5, modulationIndex: 18, resonance: 6000, octaves: 1,
+}).connect(perc2Filter);
+clave2.volume.value = -34;
+
+// sonar: one sine blip thrown into an enormous reverb — the whole sound is tail
+const sonarReverb = new Tone.Reverb({ decay: 15, preDelay: 0.02, wet: 0.82 }).connect(masterBus);
+const sonarDelay = new Tone.FeedbackDelay({ delayTime: '2n', feedback: 0.5, wet: 0.35 }).connect(sonarReverb);
+const sonar = new Tone.Synth({
+  oscillator: { type: 'sine' },
+  envelope: { attack: 0.004, decay: 0.35, sustain: 0, release: 0.5 },
+}).connect(sonarDelay);
+sonar.volume.value = -14;
+
+// plucked string into ping-pong — sparse dub stabs, woody against all the saws
+const pluckDelay = new Tone.PingPongDelay({ delayTime: '8n.', feedback: 0.45, wet: 0.35 }).connect(masterBus);
+const pluckFilter = new Tone.Filter(2200, 'lowpass').connect(pluckDelay);
+const pluck = new Tone.PluckSynth({ attackNoise: 1, dampening: 2600, resonance: 0.92 }).connect(pluckFilter);
+pluck.volume.value = -8;
+
+// shimmer pad: reverb whose feedback path is pitched up an octave, so the tail
+// keeps climbing instead of decaying flat
+const shimmerReverb = new Tone.Reverb({ decay: 10, preDelay: 0.04, wet: 0.7 }).connect(masterBus);
+const shimmerShift = new Tone.PitchShift({ pitch: 12, feedback: 0.35, wet: 0.5 }).connect(shimmerReverb);
+const shimmerFilter = new Tone.Filter({ frequency: 1200, type: 'lowpass' }).connect(shimmerShift);
+const shimmerSynth = new Tone.PolySynth(Tone.Synth, {
+  oscillator: { type: 'triangle' },
+  envelope: { attack: 1.5, decay: 1, sustain: 0.7, release: 4 },
+}).connect(shimmerFilter);
+shimmerSynth.volume.value = -20;
+
+// ------------------------------------------------------------------- patterns
+Tone.Transport.bpm.value = 132;
+const SIXTEENTH = Tone.Time('16n').toSeconds();
+
+// half-note rumble under the four-on-the-floor kick — on every kick it turns to
+// mud, since the reverb tail is still ringing when the next one lands
+const RUMBLE_PATTERN = [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+const CLANK_PATTERN = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0];
+// on the downbeats, not offbeat — with a 0.6s attack an offbeat stab would land
+// nowhere near its step. Twice a bar keeps the pad breathing without retriggering
+// so often that the long release piles voices up.
+const CHORD_PATTERN = [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+
+// Two 16-step gates for the acid hand (1 = trigger, 0 = rest). `gateMult` is
+// note length as a multiple of a 16th. Straight 8ths give a plain 4/4 pulse
+// that sits right on the kick; the syncopated one is the acid groove figure.
+// (Triggering every single 16th, as this originally did, just blurs into a
+// drone — hence the halved rate on the straight pattern.)
+//
+// `octave` jumps a step up 12 semitones and `accent` hits it harder — the two
+// tricks that give a 303 line its shape instead of a flat repeating note. With
+// portamento on the synth, the jumps also glide, which is the classic slide.
+const MELODY_PATTERNS = [
+  {
+    name: 'straight 8ths',
+    steps: [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+    octave: [0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 12, 0],
+    accent: [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
+    gateMult: 1.3,
+  },
+  {
+    name: 'acid syncopated',
+    steps: [1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 0],
+    octave: [0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 12, 0],
+    accent: [1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0],
+    gateMult: 0.55,
+  },
+];
+
+// C minor pentatonic, low register — finger count 0..5 picks the note
+const SCALE = ['C2', 'D#2', 'F2', 'G2', 'A#2', 'C3'];
+
+// index 0 is a fist = silence. Sevenths and added ninths rather than plain
+// triads: a bare minor triad resolves too cleanly and starts sounding like
+// house, where these stay unsettled and hang under the track.
+const CHORDS = [
+  null,
+  ['C3', 'D#3', 'G3', 'D4'],    // Cm(add9)
+  ['D#3', 'G3', 'A#3', 'D4'],   // Ebmaj7
+  ['F3', 'G#3', 'C4', 'D#4'],   // Fm7
+  ['G3', 'A#3', 'D4', 'F4'],    // Gm7
+  ['A#2', 'F3', 'G#3', 'C4'],   // Bbsus
+];
+const CHORD_NAMES = [null, 'Cm9', 'Ebmaj7', 'Fm7', 'Gm7', 'Bbsus'];
+// octave-up root, appended when the hand is spread wide, for an open voicing
+const CHORD_WIDE_TOP = [null, 'C4', 'D#4', 'F4', 'G4', 'A#3'];
+
+// Whale calls, indexed by finger count (0 = fist = silence). Positions run over
+// a 32-step / two-bar cycle: a call that repeated every bar would sound like a
+// riff, and whales phrase much slower than the rest of the track. Each entry is
+// just a pitch to glide to — the portamento draws the actual contour between
+// them, so two sparse notes become one long swooping moan.
+const WHALE_CALLS = [
+  null,
+  [{ at: 0, note: 'C2', dur: '1n' }, { at: 10, note: 'G2', dur: '1n' }],
+  [{ at: 0, note: 'A#2', dur: '1n' }, { at: 8, note: 'D#2', dur: '1n' }, { at: 20, note: 'C2', dur: '2n' }],
+  [{ at: 0, note: 'F2', dur: '2n' }, { at: 6, note: 'C3', dur: '2n' }, { at: 14, note: 'G2', dur: '2n' }, { at: 24, note: 'D#2', dur: '2n' }],
+  [{ at: 0, note: 'D#3', dur: '1n' }, { at: 12, note: 'A#3', dur: '2n' }, { at: 22, note: 'F3', dur: '2n' }],
+  [{ at: 0, note: 'C1', dur: '1n' }, { at: 16, note: 'G1', dur: '1n' }],
+];
+const WHALE_NAMES = [null, 'rising moan', 'descending', 'arcing song', 'keening', 'deep groan'];
+
+// Bresenham euclidean rhythm: distributes `pulses` hits as evenly as possible
+// across `steps`. Densities picked so the five tracks interlock rather than
+// doubling each other — 4 and 2 line up, 3/5/7 keep sliding against them.
+function euclid(pulses, steps) {
+  const out = [];
+  let bucket = 0;
+  for (let i = 0; i < steps; i++) {
+    bucket += pulses;
+    if (bucket >= steps) { bucket -= steps; out.push(1); } else out.push(0);
+  }
+  return out;
+}
+const EUCLID_PATTERNS = {
+  thumb: euclid(4, 16),
+  index: euclid(3, 16),
+  middle: euclid(7, 16),
+  ring: euclid(5, 16),
+  pinky: euclid(2, 16),
+};
+
+// sonar ping spacing by finger count, in 16th steps over the 32-step cycle
+const SONAR_SPACING = [0, 32, 16, 8, 4, 2];
+const PLUCK_PATTERN = [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0];
+
+// --------------------------------------------------------------------- state
+// The fixed cycle order. A hand advances one place every time it flips over, so
+// this order is the whole navigation model — related voices sit next to each
+// other, and drums stay at index 0 since that's where every new hand starts.
+const INSTRUMENTS = [
+  { id: 'drums', label: 'drums', color: '#55efc4' },
+  { id: 'acid', label: 'acid', color: '#a29bfe' },
+  { id: 'chords', label: 'chords', color: '#ffeaa7' },
+  { id: 'whale', label: 'whale', color: '#74b9ff' },
+  { id: 'euclid', label: 'euclid', color: '#00cec9' },
+  { id: 'pluck', label: 'pluck', color: '#fab1a0' },
+  { id: 'shimmer', label: 'shimmer', color: '#dfe6e9' },
+  { id: 'sonar', label: 'sonar', color: '#81ecec' },
+];
+const INSTRUMENT_IDS = INSTRUMENTS.map((i) => i.id);
+
+const noGates = () => ({ thumb: false, index: false, middle: false, ring: false, pinky: false });
+
+// every instrument is always live; hands only decide which of these get fed
+const S = {
+  drums: { gates: noGates() },
+  euclid: { gates: noGates() },
+  acid: { note: null, active: false, patternIndex: 0 },
+  pluck: { note: null, active: false },
+  chords: { degree: 0, active: false, wide: false },
+  shimmer: { degree: 0, active: false, wide: false },
+  whale: { call: 0, active: false, transpose: 0 },
+  sonar: { call: 0, active: false, transpose: 0 },
+};
+
+const TRACK_LABELS = {
+  drums: { thumb: 'rumble', index: 'kick', middle: 'hat', ring: 'clank', pinky: 'atmos' },
+  euclid: { thumb: 'sub', index: 'rim', middle: 'tick', ring: 'tom', pinky: 'clave' },
+};
+
+let step = 0;
+let bar = 0;
+Tone.Transport.scheduleRepeat((time) => {
+  const cyclePos = (bar % 2) * 16 + step;
+
+  const d = S.drums.gates;
+  if (d.index && step % 4 === 0) kick.triggerAttackRelease('C1', '8n', time);
+  if (d.middle && step % 4 === 2) hihat.triggerAttackRelease('16n', time, 0.7);
+  if (d.ring && CLANK_PATTERN[step]) clank.triggerAttackRelease('16n', time, 0.8);
+  // rumble follows whatever note the acid hand is holding, an octave down, so
+  // the two players stay in the same key; falls back to the root when acid idles
+  if (d.thumb && RUMBLE_PATTERN[step]) {
+    const root = S.acid.active && S.acid.note ? S.acid.note : 'C2';
+    rumble.triggerAttackRelease(Tone.Frequency(root).transpose(-12), '2n', time);
+  }
+
+  const e = S.euclid.gates;
+  if (e.thumb && EUCLID_PATTERNS.thumb[step]) sub2.triggerAttackRelease('C1', '8n', time);
+  if (e.index && EUCLID_PATTERNS.index[step]) rim2.triggerAttackRelease('16n', time, 0.8);
+  if (e.middle && EUCLID_PATTERNS.middle[step]) tick2.triggerAttackRelease('32n', time, 0.6);
+  if (e.ring && EUCLID_PATTERNS.ring[step]) tom2.triggerAttackRelease('G1', '8n', time, 0.7);
+  if (e.pinky && EUCLID_PATTERNS.pinky[step]) clave2.triggerAttackRelease('32n', time, 0.7);
+
+  const mp = MELODY_PATTERNS[S.acid.patternIndex];
+  if (S.acid.active && S.acid.note && mp.steps[step]) {
+    const note = Tone.Frequency(S.acid.note).transpose(mp.octave[step]);
+    melodySynth.triggerAttackRelease(note, SIXTEENTH * mp.gateMult, time, mp.accent[step] ? 1 : 0.55);
+  }
+
+  if (S.pluck.active && S.pluck.note && PLUCK_PATTERN[step]) {
+    pluck.triggerAttack(Tone.Frequency(S.pluck.note).transpose(12), time);
+  }
+
+  if (S.chords.active && CHORDS[S.chords.degree] && CHORD_PATTERN[step]) {
+    const base = CHORDS[S.chords.degree];
+    chordSynth.triggerAttackRelease(S.chords.wide ? base.concat(CHORD_WIDE_TOP[S.chords.degree]) : base, '2n', time);
+  }
+
+  // shimmer re-swells only once per two-bar cycle — its tail is so long that
+  // triggering more often just stacks voices into mush
+  if (S.shimmer.active && CHORDS[S.shimmer.degree] && cyclePos === 0) {
+    const base = CHORDS[S.shimmer.degree];
+    shimmerSynth.triggerAttackRelease(S.shimmer.wide ? base.concat(CHORD_WIDE_TOP[S.shimmer.degree]) : base, '1n', time);
+  }
+
+  const call = WHALE_CALLS[S.whale.call];
+  if (S.whale.active && call) {
+    call.forEach((ev) => {
+      if (ev.at !== cyclePos) return;
+      whale.triggerAttackRelease(Tone.Frequency(ev.note).transpose(S.whale.transpose), ev.dur, time);
+    });
+  }
+
+  const spacing = SONAR_SPACING[S.sonar.call];
+  if (S.sonar.active && spacing && cyclePos % spacing === 0) {
+    sonar.triggerAttackRelease(Tone.Frequency('A4').transpose(S.sonar.transpose), '8n', time);
+  }
+
+  step = (step + 1) % 16;
+  if (step === 0) bar = (bar + 1) % 4;
+}, '16n');
+
+// -------------------------------------------------------------------- helpers
+function clamp(v, lo, hi) {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+function mapRange(v, inLo, inHi, outLo, outHi) {
+  const t = clamp((v - inLo) / (inHi - inLo), 0, 1);
+  return outLo + t * (outHi - outLo);
+}
+
+// shoelace formula for the polygon traced across the 5 fingertips
+function polygonArea(points) {
+  let sum = 0;
+  for (let i = 0; i < points.length; i++) {
+    const [x1, y1] = points[i];
+    const [x2, y2] = points[(i + 1) % points.length];
+    sum += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(sum) / 2;
+}
+
+const FINGERTIPS = [4, 8, 12, 16, 20];
+
+// normalized by hand size so it stays stable regardless of camera distance
+function polygonOpenness(landmarks) {
+  const points = FINGERTIPS.map((idx) => [landmarks[idx].x, landmarks[idx].y]);
+  const handScale = Math.hypot(landmarks[9].x - landmarks[0].x, landmarks[9].y - landmarks[0].y);
+  if (handScale <= 0) return 0;
+  return clamp(polygonArea(points) / (handScale * handScale), 0, 2);
+}
+
+function fingerStates(landmarks) {
+  const tipByName = { index: 8, middle: 12, ring: 16, pinky: 20 };
+  const pipByName = { index: 6, middle: 10, ring: 14, pinky: 18 };
+  const states = {};
+  for (const name in tipByName) {
+    states[name] = landmarks[tipByName[name]].y < landmarks[pipByName[name]].y - 0.02;
+  }
+  // thumb sticks out sideways rather than curling up, so it needs an x test
+  states.thumb = Math.abs(landmarks[4].x - landmarks[2].x) > 0.06;
+  return states;
+}
+
+function countExtended(states) {
+  return Object.values(states).filter(Boolean).length;
+}
+
+// angle of the palm away from vertical, in radians (0 = upright)
+function handTilt(landmarks) {
+  const dx = landmarks[9].x - landmarks[0].x;
+  const dy = landmarks[9].y - landmarks[0].y;
+  return Math.atan2(dx, -dy);
+}
+
+// ----------------------------------------------------------- hand orientation
+// MediaPipe has no palm/back flag, but the winding order of the palm landmarks
+// in image space encodes it: the wrist->indexMCP and wrist->pinkyMCP vectors
+// swap which side they fall on when the hand turns over, flipping the sign of
+// their 2D cross product. That sign also flips between left and right hands,
+// so it has to be normalized by handedness before it means anything.
+//
+// If palm and back come out swapped on your camera, flip this one constant.
+const ORIENTATION_FLIP = false;
+
+// Committing to a side takes a clear reading held over several frames.
+//
+// The threshold is deliberately low. The value is sin() of the angle between
+// the two palm vectors, and on a real hand that angle is only ~25-40° even when
+// the palm faces the camera dead-on — so the usable range tops out around
+// 0.4-0.6. A threshold near that ceiling is unreachable in practice. Keep this
+// just high enough to exclude the edge-on zone where the sign is noise, and let
+// the frame hold below do the actual debouncing.
+const ORIENTATION_COMMIT = 0.18;
+const ORIENTATION_HOLD = 6;       // consecutive frames, ~0.2s at 30fps
+
+// signed twist of the palm, roughly -1..1; null when the hand is degenerate
+function handTwist(landmarks, isRight) {
+  const wrist = landmarks[0];
+  const v1x = landmarks[5].x - wrist.x, v1y = landmarks[5].y - wrist.y;
+  const v2x = landmarks[17].x - wrist.x, v2y = landmarks[17].y - wrist.y;
+  const scale = Math.hypot(v1x, v1y) * Math.hypot(v2x, v2y);
+  if (scale <= 0) return null;
+  const norm = (v1x * v2y - v1y * v2x) / scale;
+  return (isRight ? norm : -norm) * (ORIENTATION_FLIP ? -1 : 1);
+}
+
+// which side the value clearly indicates, or null while it's still ambiguous
+function twistSide(twist) {
+  if (twist === null || Math.abs(twist) < ORIENTATION_COMMIT) return null;
+  return twist > 0 ? 'back' : 'palm';
+}
+
+// MediaPipe labels handedness as though looking at an unmirrored image, so with
+// a selfie-view camera the physical left hand reports as "Right". Correct it
+// once here rather than at every call site.
+const HANDEDNESS_FLIP = true;
+
+function isRightHand(label) {
+  const raw = label === 'Right';
+  return HANDEDNESS_FLIP ? !raw : raw;
+}
+
+// -------------------------------------------------------------- hand tracking
+// MediaPipe gives no stable hand IDs and reorders its results between frames,
+// so a per-hand instrument cursor needs identity of our own. Nearest-wrist
+// matching is enough here: hands move far less between frames than they sit
+// apart from each other. A hand keeps its slot for a few frames after it
+// disappears, so a brief tracking dropout doesn't reset anyone's instrument.
+const MATCH_DIST = 0.22;   // normalized frame units
+const MAX_MISSING = 12;    // ~0.4s at 30fps
+const tracked = [];
+let nextHandId = 1;
+
+function matchHands(dets) {
+  const used = trackedFlags();
+  const out = [];
+  dets.forEach((det) => {
+    const wx = det.landmarks[0].x, wy = det.landmarks[0].y;
+    let best = -1, bestDist = MATCH_DIST;
+    tracked.forEach((t, i) => {
+      if (used[i]) return;
+      const dist = Math.hypot(t.x - wx, t.y - wy);
+      if (dist < bestDist) { bestDist = dist; best = i; }
+    });
+    let t;
+    if (best >= 0) {
+      t = tracked[best];
+      used[best] = true;
+    } else {
+      t = { id: nextHandId++, instrument: 0, orientation: null, pending: null, pendingFrames: 0, flash: 0, x: wx, y: wy, missing: 0 };
+      tracked.push(t);
+      used.push(true);
+    }
+    t.x = wx; t.y = wy; t.missing = 0;
+    out.push({ ...det, track: t });
+  });
+  for (let i = tracked.length - 1; i >= 0; i--) {
+    if (used[i]) continue;
+    tracked[i].missing++;
+    if (tracked[i].missing > MAX_MISSING) tracked.splice(i, 1);
+  }
+  return out;
+}
+
+function trackedFlags() {
+  return new Array(tracked.length).fill(false);
+}
+
+// ------------------------------------------------------------------ rack view
+const rackEl = document.getElementById('rack');
+const rackEls = {};
+INSTRUMENTS.forEach((inst) => {
+  const el = document.createElement('div');
+  el.className = 'slot';
+  el.innerHTML = `<div class="slotName">${inst.label}</div><div class="slotState">&mdash;</div>`;
+  rackEl.appendChild(el);
+  rackEls[inst.id] = { root: el, state: el.querySelector('.slotState') };
+});
+
+function setInstrumentActive(id, active, stateText) {
+  const s = rackEls[id];
+  const color = INSTRUMENTS.find((i) => i.id === id).color;
+  s.root.classList.toggle('active', active);
+  s.root.style.borderColor = active ? color : '';
+  s.state.textContent = active ? stateText : '—';
+  s.state.style.color = active ? color : '';
+}
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+let audioStarted = false;
+
+function onResults(results) {
+  ctx2d.save();
+  ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+
+  const dets = [];
+  if (results.multiHandLandmarks) {
+    results.multiHandLandmarks.forEach((landmarks, i) => {
+      const label = results.multiHandedness && results.multiHandedness[i] && results.multiHandedness[i].label;
+      dets.push({ landmarks, twist: handTwist(landmarks, isRightHand(label)) });
+    });
+  }
+
+  const live = matchHands(dets);
+
+  // Only the back-to-palm half of a flip advances the instrument. Showing the
+  // back of the hand keeps playing the current one, so a full turn-and-return
+  // is a single step — and a hand resting palm-down can't drift forward.
+  //
+  // A new side only takes effect after it has been held clearly for
+  // ORIENTATION_HOLD frames in a row. Anything short of that — noise, a hand
+  // waved through an angle, a momentary misread — never reaches the commit and
+  // leaves the current instrument alone.
+  live.forEach((h) => {
+    const t = h.track;
+    const side = twistSide(h.twist);
+
+    if (side === null || side === t.orientation) {
+      t.pending = null;
+      t.pendingFrames = 0;
+      return;
+    }
+
+    if (t.pending === side) t.pendingFrames++;
+    else { t.pending = side; t.pendingFrames = 1; }
+
+    if (t.pendingFrames < ORIENTATION_HOLD) return;
+
+    const previous = t.orientation;
+    t.orientation = side;
+    t.pending = null;
+    t.pendingFrames = 0;
+    if (previous === 'back' && side === 'palm') {
+      t.instrument = (t.instrument + 1) % INSTRUMENTS.length;
+      t.flash = 1;
+    }
+  });
+
+  // any number of hands can land on the same instrument — they're collected
+  // per instrument and merged below rather than fighting over one slot
+  const byInst = {};
+  INSTRUMENT_IDS.forEach((id) => { byInst[id] = []; });
+  live.forEach((h) => byInst[INSTRUMENTS[h.track.instrument].id].push(h.landmarks));
+
+  live.forEach((h) => {
+    const inst = INSTRUMENTS[h.track.instrument];
+    if (window.drawConnectors) {
+      drawConnectors(ctx2d, h.landmarks, HAND_CONNECTIONS, { color: inst.color, lineWidth: 2 });
+      drawLandmarks(ctx2d, h.landmarks, { color: '#ffffff', lineWidth: 1, radius: 3 });
+    }
+    // name the instrument on the hand itself — with eight voices in the cycle,
+    // the rack alone doesn't tell a player which one is theirs.
+    //
+    // The canvas element is CSS-mirrored, which is what makes the skeletons line
+    // up with the mirrored video. So raw landmark x is already correct here —
+    // pre-mirroring it would flip a second time and land on the wrong hand.
+    const wrist = h.landmarks[0];
+    const px = wrist.x * canvas.width;
+    const py = wrist.y * canvas.height;
+    ctx2d.save();
+    ctx2d.font = '700 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx2d.textAlign = 'center';
+    ctx2d.shadowColor = 'rgba(0,0,0,.9)';
+    ctx2d.shadowBlur = 6;
+    ctx2d.globalAlpha = h.track.flash > 0 ? 1 : 0.9;
+    ctx2d.fillStyle = inst.color;
+    // glyphs need the mirror undone locally, or the text renders backwards
+    ctx2d.save();
+    ctx2d.translate(px, py + 26);
+    ctx2d.scale(-1, 1);
+    ctx2d.fillText(inst.label.toUpperCase(), 0, 0);
+    ctx2d.restore();
+    // arming ring: fills while a new side is being held, so the hold time reads
+    // as deliberate feedback rather than as the app failing to respond
+    if (h.track.pendingFrames > 0) {
+      ctx2d.globalAlpha = 0.85;
+      ctx2d.beginPath();
+      ctx2d.arc(px, py, 38, -Math.PI / 2, -Math.PI / 2 + (h.track.pendingFrames / ORIENTATION_HOLD) * Math.PI * 2);
+      ctx2d.strokeStyle = '#ffffff';
+      ctx2d.lineWidth = 4;
+      ctx2d.lineCap = 'round';
+      ctx2d.stroke();
+    }
+    if (h.track.flash > 0) {
+      ctx2d.globalAlpha = h.track.flash;
+      ctx2d.beginPath();
+      ctx2d.arc(px, py, 34 + (1 - h.track.flash) * 26, 0, Math.PI * 2);
+      ctx2d.strokeStyle = inst.color;
+      ctx2d.lineWidth = 3;
+      ctx2d.stroke();
+      h.track.flash = Math.max(0, h.track.flash - 0.06);
+    }
+    ctx2d.restore();
+  });
+
+  const stateText = {};
+
+  // kits merge: every hand's finger gates are OR-ed together, so two players on
+  // one kit build a combined pattern instead of overwriting each other
+  function applyKit(id, hands, filter, lo, hi, withAtmos) {
+    const st = S[id];
+    if (!hands.length) {
+      st.gates = noGates();
+      if (withAtmos && audioStarted) atmosGain.gain.linearRampTo(0, 0.5);
+      return;
+    }
+    const merged = noGates();
+    let height = 0;
+    hands.forEach((lm) => {
+      const g = fingerStates(lm);
+      for (const k in merged) merged[k] = merged[k] || g[k];
+      height = Math.max(height, clamp(1 - lm[0].y, 0, 1));
+    });
+    st.gates = merged;
+    if (audioStarted) {
+      filter.frequency.rampTo(mapRange(height, 0, 1, lo, hi), 0.08);
+      // atmos is a continuous source, so it fades rather than being triggered
+      if (withAtmos) atmosGain.gain.linearRampTo(merged.pinky ? 0.13 : 0, 0.5);
+    }
+    const labels = TRACK_LABELS[id];
+    const on = Object.keys(labels).filter((n) => merged[n]).map((n) => labels[n]);
+    stateText[id] = on.length ? on.join(' + ') : 'muted';
+  }
+
+  applyKit('drums', byInst.drums, drumFilter, 500, 9000, true);
+  applyKit('euclid', byInst.euclid, perc2Filter, 700, 12000, false);
+
+  // the melodic voices are monophonic, so extra hands on them can't merge —
+  // the first one detected drives, and the rack shows the passenger count
+  if (byInst.acid.length) {
+    const lm = byInst.acid[0];
+    const count = countExtended(fingerStates(lm));
+    const heightFrac = clamp(1 - lm[0].y, 0, 1);
+    const openness = polygonOpenness(lm);
+    S.acid.active = count > 0;
+    S.acid.note = SCALE[count];
+    const tilt = Math.abs(handTilt(lm));
+    if (tilt > 0.55) S.acid.patternIndex = 1;
+    else if (tilt < 0.35) S.acid.patternIndex = 0;
+    if (audioStarted) {
+      melodyFilter.frequency.rampTo(mapRange(heightFrac, 0, 1, 200, 3200), 0.05);
+      melodyFilter.Q.rampTo(mapRange(openness, 0.1, 1.2, 2, 18), 0.08);
+      melodyDist.wet.rampTo(mapRange(openness, 0.1, 1.2, 0.05, 0.7), 0.08);
+    }
+    stateText.acid = count === 0 ? 'muted' : `${S.acid.note} · ${MELODY_PATTERNS[S.acid.patternIndex].name}`;
+  } else {
+    S.acid.active = false;
+  }
+
+  if (byInst.pluck.length) {
+    const lm = byInst.pluck[0];
+    const count = countExtended(fingerStates(lm));
+    const heightFrac = clamp(1 - lm[0].y, 0, 1);
+    S.pluck.active = count > 0;
+    S.pluck.note = SCALE[count];
+    if (audioStarted) {
+      pluckFilter.frequency.rampTo(mapRange(heightFrac, 0, 1, 500, 5000), 0.08);
+      pluckDelay.feedback.linearRampTo(mapRange(polygonOpenness(lm), 0.1, 1.2, 0.2, 0.7), 0.15);
+    }
+    stateText.pluck = count === 0 ? 'muted' : S.pluck.note;
+  } else {
+    S.pluck.active = false;
+  }
+
+  function applyPad(id, hands, filter, lo, hi) {
+    const st = S[id];
+    if (!hands.length) { st.active = false; return; }
+    const lm = hands[0];
+    const count = countExtended(fingerStates(lm));
+    const heightFrac = clamp(1 - lm[0].y, 0, 1);
+    st.degree = count;
+    st.active = count > 0;
+    st.wide = polygonOpenness(lm) > 0.7;
+    if (audioStarted) filter.frequency.rampTo(mapRange(heightFrac, 0, 1, lo, hi), 0.12);
+    stateText[id] = count === 0 ? 'muted' : `${CHORD_NAMES[count]}${st.wide ? ' wide' : ''}`;
+  }
+
+  // narrower and darker than the other voices — letting the pad open up to 5kHz
+  // pulled it in front of the drums instead of leaving it behind them
+  applyPad('chords', byInst.chords, chordFilter, 250, 2600);
+  applyPad('shimmer', byInst.shimmer, shimmerFilter, 400, 3400);
+
+  function applyCall(id, hands) {
+    const st = S[id];
+    if (!hands.length) { st.active = false; return; }
+    const lm = hands[0];
+    const count = countExtended(fingerStates(lm));
+    const heightFrac = clamp(1 - lm[0].y, 0, 1);
+    const openness = polygonOpenness(lm);
+    st.call = count;
+    st.active = count > 0;
+    // height shifts the whole call an octave either way, so the same contour can
+    // be a distant sub groan or a near, keening one
+    st.transpose = Math.round(mapRange(heightFrac, 0, 1, -12, 12));
+    if (audioStarted) {
+      if (id === 'whale') {
+        whaleFilter.frequency.rampTo(mapRange(heightFrac, 0, 1, 400, 2200), 0.2);
+        whaleVibrato.depth.linearRampTo(mapRange(openness, 0.1, 1.2, 0.04, 0.35), 0.2);
+      } else {
+        sonarDelay.feedback.linearRampTo(mapRange(openness, 0.1, 1.2, 0.25, 0.75), 0.2);
+      }
+    }
+    const sign = st.transpose >= 0 ? '+' : '';
+    stateText[id] = count === 0
+      ? 'silent'
+      : id === 'whale'
+        ? `${WHALE_NAMES[count]} ${sign}${st.transpose}`
+        : `ping /${SONAR_SPACING[count]} ${sign}${st.transpose}`;
+  }
+
+  applyCall('whale', byInst.whale);
+  applyCall('sonar', byInst.sonar);
+
+  INSTRUMENT_IDS.forEach((id) => {
+    const extra = byInst[id].length > 1 ? ` +${byInst[id].length - 1}` : '';
+    setInstrumentActive(id, byInst[id].length > 0, (stateText[id] || '') + extra);
+  });
+
+  ctx2d.restore();
+  const playing = INSTRUMENT_IDS.filter((id) => byInst[id].length > 0).length;
+  statusEl.textContent = live.length
+    ? `${live.length} hand${live.length > 1 ? 's' : ''} · ${playing} instrument${playing > 1 ? 's' : ''} live`
+    : 'raise a hand to play';
+}
+
+const hands = new Hands({
+  locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+});
+hands.setOptions({
+  maxNumHands: 4,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.6,
+  minTrackingConfidence: 0.6,
+});
+hands.onResults(onResults);
+
+let camera = null;
+
+startBtn.addEventListener('click', async () => {
+  try {
+    await Tone.start();
+    audioStarted = true;
+    // continuous sources have to be started once; their level stays at 0 until
+    // a hand actually gates them in
+    atmos.start();
+    atmosFilter.start();
+    chordChorus.start();
+    whaleChorus.start();
+    Tone.Transport.start();
+
+    camera = new Camera(video, {
+      onFrame: async () => {
+        await hands.send({ image: video });
+      },
+      width: 1280,
+      height: 720,
+    });
+    await camera.start();
+
+    startOverlay.style.display = 'none';
+    startBtn.blur(); // so the first space press toggles the UI, not this button
+    statusEl.textContent = 'raise a hand to play';
+  } catch (err) {
+    statusEl.textContent = 'error: ' + err.message;
+    console.error(err);
+  }
+});
+
+// Space toggles performance mode. This is a stage control, not an instrument
+// control — everything musical stays gesture-only.
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'Space') return;
+  e.preventDefault(); // otherwise space re-fires the still-focused start button
+  document.body.classList.toggle('chrome-hidden');
+});
+
+statusEl.textContent = 'click start';
+</script>
+</body>
+</html>
