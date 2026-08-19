@@ -180,7 +180,7 @@
   </div>
   <div id="startOverlay">
     <button id="startBtn">Start camera + audio</button>
-    <small>Runs entirely in your browser. Nothing is recorded or sent anywhere.</small>
+    <small id="startHint">Runs entirely in your browser. Nothing is recorded or sent anywhere.</small>
   </div>
 </div>
 
@@ -195,6 +195,7 @@ const ctx2d = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
 const startOverlay = document.getElementById('startOverlay');
 const startBtn = document.getElementById('startBtn');
+const startHint = document.getElementById('startHint');
 
 // ---------------------------------------------------------------- audio graph
 // Everything funnels into masterBus, then glue compression and a limiter. The
@@ -1011,11 +1012,11 @@ function muteCameraVideo() {
   }
 }
 
-async function unlockIOSAudio() {
+function unlockIOSAudio() {
   muteCameraVideo();
   setPlaybackSession();
-  try { await silentUnlock.play(); } catch (err) { /* play() can race the gesture */ }
-  try { await Tone.context.resume(); } catch (err) { /* context may not exist yet */ }
+  silentUnlock.play().catch(() => {});
+  if (Tone.context) Tone.context.resume().catch(() => {});
 }
 
 if (navigator.audioSession) {
@@ -1030,10 +1031,26 @@ document.addEventListener('visibilitychange', () => {
 });
 
 startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  startHint.textContent = 'Starting…';
+  muteCameraVideo();
+
+  camera = new Camera(video, {
+    onFrame: async () => {
+      await hands.send({ image: video });
+    },
+    width: 1280,
+    height: 720,
+  });
+
+  // iOS consumes a tap for getUserMedia / AudioContext. Both must be
+  // kicked off in this turn — awaiting dummy audio first ate the gesture
+  // and left the button looking dead.
+  const cameraReady = camera.start();
+  const audioReady = Tone.start();
+
   try {
-    muteCameraVideo();
-    await unlockIOSAudio();
-    await Tone.start();
+    await audioReady;
     audioStarted = true;
     // continuous sources have to be started once; their level stays at 0 until
     // a hand actually gates them in
@@ -1043,23 +1060,19 @@ startBtn.addEventListener('click', async () => {
     whaleChorus.start();
     Tone.Transport.start();
 
-    camera = new Camera(video, {
-      onFrame: async () => {
-        await hands.send({ image: video });
-      },
-      width: 1280,
-      height: 720,
-    });
-    await camera.start();
+    await cameraReady;
     // getUserMedia just switched iOS back to a call-style route — undo that
     // and resume Web Audio, which Safari often suspends at the same time.
-    await unlockIOSAudio();
+    unlockIOSAudio();
 
     startOverlay.style.display = 'none';
     startBtn.blur(); // so the first space press toggles the UI, not this button
     statusEl.textContent = 'raise a hand to play';
   } catch (err) {
-    statusEl.textContent = 'error: ' + err.message;
+    startBtn.disabled = false;
+    const message = err && err.message ? err.message : String(err);
+    startHint.textContent = message;
+    statusEl.textContent = 'error: ' + message;
     console.error(err);
   }
 });
