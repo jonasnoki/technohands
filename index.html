@@ -28,25 +28,68 @@
     transform: scaleX(-1); /* mirror */
   }
   video { visibility: hidden; }
-  #rack {
+  #dock {
     position: absolute;
     left: 50%;
     bottom: 22px;
     transform: translateX(-50%);
     display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 8px;
-    max-width: calc(100vw - 36px);
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    max-width: calc(100vw - 24px);
     z-index: 15;
     pointer-events: none;
+  }
+  #cycleBtn {
+    pointer-events: auto;
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    color: #eee;
+    padding: 9px 18px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.18);
+    background: rgba(10,10,16,.62);
+    backdrop-filter: blur(6px);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #cycleBtn:active { background: rgba(255,255,255,.16); }
+  #rack {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
     text-shadow: 0 1px 4px rgba(0,0,0,.85);
   }
-  /* the cycle order is left-to-right, so the rack doubles as the map of what
-     flipping your hand steps through */
+  /* one box per pair of hands, in the order the pairs appear on screen — the
+     rack is the map of which hands get which voices */
+  .pair {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 7px 7px;
+    border-radius: 15px;
+    border: 1px solid rgba(255,255,255,.07);
+    background: rgba(10,10,16,.28);
+    opacity: .5;
+    transition: opacity .2s linear, border-color .2s linear;
+  }
+  .pair.live { opacity: 1; border-color: rgba(255,255,255,.2); }
+  .pairTag {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    opacity: .5;
+  }
+  .pairSlots { display: flex; gap: 6px; }
   .slot {
-    min-width: 96px;
-    padding: 8px 12px;
+    min-width: 86px;
+    padding: 8px 11px;
     border-radius: 11px;
     border: 1px solid rgba(255,255,255,.1);
     background: rgba(10,10,16,.5);
@@ -142,14 +185,15 @@
     font-size: 11px;
   }
   /* performance mode: everything fades but the video and the tracked hands */
-  #hud, #rack {
+  #hud, #dock {
     transition: opacity .25s linear;
   }
   body.chrome-hidden #hud,
-  body.chrome-hidden #rack {
+  body.chrome-hidden #dock {
     opacity: 0;
     pointer-events: none;
   }
+  body.chrome-hidden #cycleBtn { pointer-events: none; }
   .noteBadge {
     position: absolute;
     z-index: 10;
@@ -169,12 +213,15 @@
 <div id="stage">
   <video id="video" playsinline webkit-playsinline muted autoplay></video>
   <canvas id="canvas"></canvas>
-  <div id="rack"></div>
+  <div id="dock">
+    <button id="cycleBtn" type="button">cycle pairs</button>
+    <div id="rack"></div>
+  </div>
   <div id="hud">
     <div>
       <h1>fingertips</h1>
-      <p>Stand anywhere, raise a hand. <strong>Turn your hand over</strong> to step to the next instrument &mdash; each hand cycles the row below independently, so everyone picks their own. A closed fist means silence. Any number of people can share one instrument. One 132bpm clock, so nothing drifts out of time.</p>
-      <p class="hudKey"><kbd>space</kbd> &mdash; hide interface</p>
+      <p>Stand anywhere, raise a hand. Instruments stay fixed to hands: the first pair of hands on screen plays the first pair of voices below, the next pair the next, and so on left to right. A closed fist means silence. Press <strong>cycle pairs</strong> to shift every pair to the next set of voices. One 132bpm clock, so nothing drifts out of time.</p>
+      <p class="hudKey"><kbd>space</kbd> or a tap on the background &mdash; hide interface</p>
     </div>
     <div id="status">loading&hellip;</div>
   </div>
@@ -189,6 +236,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js" crossorigin="anonymous"></script>
 <script>
+const stage = document.getElementById('stage');
+const cycleBtn = document.getElementById('cycleBtn');
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx2d = canvas.getContext('2d');
@@ -458,20 +507,21 @@ const SONAR_SPACING = [0, 32, 16, 8, 4, 2];
 const PLUCK_PATTERN = [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0];
 
 // --------------------------------------------------------------------- state
-// The fixed cycle order. A hand advances one place every time it flips over, so
-// this order is the whole navigation model — related voices sit next to each
-// other, and drums stay at index 0 since that's where every new hand starts.
+// Every voice, keyed by id. PAIR_SETS below decides which pair of hands gets
+// which two of these; this table only carries the label and the colour.
 const INSTRUMENTS = [
   { id: 'drums', label: 'drums', color: '#55efc4' },
   { id: 'acid', label: 'acid', color: '#a29bfe' },
-  { id: 'chords', label: 'chords', color: '#ffeaa7' },
   { id: 'whale', label: 'whale', color: '#74b9ff' },
+  { id: 'sonar', label: 'sonar', color: '#81ecec' },
+  { id: 'chords', label: 'chords', color: '#ffeaa7' },
+  { id: 'shimmer', label: 'shimmer', color: '#dfe6e9' },
   { id: 'euclid', label: 'euclid', color: '#00cec9' },
   { id: 'pluck', label: 'pluck', color: '#fab1a0' },
-  { id: 'shimmer', label: 'shimmer', color: '#dfe6e9' },
-  { id: 'sonar', label: 'sonar', color: '#81ecec' },
 ];
 const INSTRUMENT_IDS = INSTRUMENTS.map((i) => i.id);
+const instrumentById = {};
+INSTRUMENTS.forEach((i) => { instrumentById[i.id] = i; });
 
 const noGates = () => ({ thumb: false, index: false, middle: false, ring: false, pinky: false });
 
@@ -608,60 +658,75 @@ function handTilt(landmarks) {
   return Math.atan2(dx, -dy);
 }
 
-// ----------------------------------------------------------- hand orientation
-// MediaPipe has no palm/back flag, but the winding order of the palm landmarks
-// in image space encodes it: the wrist->indexMCP and wrist->pinkyMCP vectors
-// swap which side they fall on when the hand turns over, flipping the sign of
-// their 2D cross product. That sign also flips between left and right hands,
-// so it has to be normalized by handedness before it means anything.
+// ----------------------------------------------------------- pair assignment
+// Instruments are fixed to hands by where the hands are, not by any gesture.
+// Sort every visible hand left to right on screen, take them two at a time, and
+// hand each pair one PAIR_SET. Within a pair the left hand plays the first
+// voice and the right hand the second, so a single player's two hands always
+// get the same two instruments in the same places.
 //
-// If palm and back come out swapped on your camera, flip this one constant.
-const ORIENTATION_FLIP = false;
-
-// Committing to a side takes a clear reading held over several frames.
-//
-// The threshold is deliberately low. The value is sin() of the angle between
-// the two palm vectors, and on a real hand that angle is only ~25-40° even when
-// the palm faces the camera dead-on — so the usable range tops out around
-// 0.4-0.6. A threshold near that ceiling is unreachable in practice. Keep this
-// just high enough to exclude the edge-on zone where the sign is noise, and let
-// the frame hold below do the actual debouncing.
-const ORIENTATION_COMMIT = 0.18;
-const ORIENTATION_HOLD = 6;       // consecutive frames, ~0.2s at 30fps
-
-// signed twist of the palm, roughly -1..1; null when the hand is degenerate
-function handTwist(landmarks, isRight) {
-  const wrist = landmarks[0];
-  const v1x = landmarks[5].x - wrist.x, v1y = landmarks[5].y - wrist.y;
-  const v2x = landmarks[17].x - wrist.x, v2y = landmarks[17].y - wrist.y;
-  const scale = Math.hypot(v1x, v1y) * Math.hypot(v2x, v2y);
-  if (scale <= 0) return null;
-  const norm = (v1x * v2y - v1y * v2x) / scale;
-  return (isRight ? norm : -norm) * (ORIENTATION_FLIP ? -1 : 1);
+// The screen is mirrored, so screen-left is the high end of the landmark x
+// range — hence the 1 - x here.
+function screenX(landmarks) {
+  return 1 - landmarks[0].x;
 }
 
-// which side the value clearly indicates, or null while it's still ambiguous
-function twistSide(twist) {
-  if (twist === null || Math.abs(twist) < ORIENTATION_COMMIT) return null;
-  return twist > 0 ? 'back' : 'palm';
+const PAIR_SETS = [
+  ['drums', 'acid'],
+  ['whale', 'sonar'],
+  ['chords', 'shimmer'],
+  ['euclid', 'pluck'],
+];
+
+// The cycle button rotates which set the first pair gets; every later pair
+// follows along, so the sets never collide and no two hands share a voice.
+let pairOffset = 0;
+
+function pairSet(pairIndex) {
+  return PAIR_SETS[(pairIndex + pairOffset) % PAIR_SETS.length];
 }
 
-// MediaPipe labels handedness as though looking at an unmirrored image, so with
-// a selfie-view camera the physical left hand reports as "Right". Correct it
-// once here rather than at every call site.
-const HANDEDNESS_FLIP = true;
+// A plain sort by x would let two hands held close together trade voices every
+// other frame. So the order persists between frames instead: a new hand is
+// inserted where it belongs, and two hands only change places once one has
+// crossed clearly past the other. One person's two hands sit well under this
+// margin apart in normal playing, so their voices stay put.
+const SWAP_MARGIN = 0.05;   // normalized frame units
+let handOrder = [];         // track ids, left to right on screen
 
-function isRightHand(label) {
-  const raw = label === 'Right';
-  return HANDEDNESS_FLIP ? !raw : raw;
+function orderHands(live) {
+  const byId = new Map(live.map((h) => [h.track.id, h]));
+  const xOf = (id) => screenX(byId.get(id).landmarks);
+
+  handOrder = handOrder.filter((id) => byId.has(id));
+  live.forEach((h) => {
+    if (handOrder.includes(h.track.id)) return;
+    const x = screenX(h.landmarks);
+    const at = handOrder.findIndex((id) => xOf(id) > x);
+    handOrder.splice(at < 0 ? handOrder.length : at, 0, h.track.id);
+  });
+
+  for (let pass = 0; pass < handOrder.length; pass++) {
+    let swapped = false;
+    for (let i = 0; i + 1 < handOrder.length; i++) {
+      if (xOf(handOrder[i + 1]) >= xOf(handOrder[i]) - SWAP_MARGIN) continue;
+      const a = handOrder[i];
+      handOrder[i] = handOrder[i + 1];
+      handOrder[i + 1] = a;
+      swapped = true;
+    }
+    if (!swapped) break;
+  }
+
+  return handOrder.map((id) => byId.get(id));
 }
 
 // -------------------------------------------------------------- hand tracking
 // MediaPipe gives no stable hand IDs and reorders its results between frames,
-// so a per-hand instrument cursor needs identity of our own. Nearest-wrist
-// matching is enough here: hands move far less between frames than they sit
-// apart from each other. A hand keeps its slot for a few frames after it
-// disappears, so a brief tracking dropout doesn't reset anyone's instrument.
+// so per-hand state needs identity of our own. Nearest-wrist matching is enough
+// here: hands move far less between frames than they sit apart from each other.
+// A hand keeps its slot for a few frames after it disappears, so a brief
+// tracking dropout doesn't restart its assignment flash.
 const MATCH_DIST = 0.22;   // normalized frame units
 const MAX_MISSING = 12;    // ~0.4s at 30fps
 const tracked = [];
@@ -683,7 +748,7 @@ function matchHands(dets) {
       t = tracked[best];
       used[best] = true;
     } else {
-      t = { id: nextHandId++, instrument: 0, orientation: null, pending: null, pendingFrames: 0, flash: 0, x: wx, y: wy, missing: 0 };
+      t = { id: nextHandId++, instrument: null, flash: 0, x: wx, y: wy, missing: 0 };
       tracked.push(t);
       used.push(true);
     }
@@ -703,19 +768,36 @@ function trackedFlags() {
 }
 
 // ------------------------------------------------------------------ rack view
+// One box per pair of hands, left to right, holding that pair's two voices.
+// Cycling moves the slot elements between the boxes, so the rack always reads
+// as the current map rather than as a fixed list.
 const rackEl = document.getElementById('rack');
 const rackEls = {};
 INSTRUMENTS.forEach((inst) => {
   const el = document.createElement('div');
   el.className = 'slot';
   el.innerHTML = `<div class="slotName">${inst.label}</div><div class="slotState">&mdash;</div>`;
-  rackEl.appendChild(el);
   rackEls[inst.id] = { root: el, state: el.querySelector('.slotState') };
 });
 
+const pairBoxes = PAIR_SETS.map((_, i) => {
+  const box = document.createElement('div');
+  box.className = 'pair';
+  box.innerHTML = `<div class="pairTag">pair ${i + 1}</div><div class="pairSlots"></div>`;
+  rackEl.appendChild(box);
+  return { root: box, slots: box.querySelector('.pairSlots') };
+});
+
+function renderPairs() {
+  pairBoxes.forEach((box, i) => {
+    pairSet(i).forEach((id) => box.slots.appendChild(rackEls[id].root));
+  });
+}
+renderPairs();
+
 function setInstrumentActive(id, active, stateText) {
   const s = rackEls[id];
-  const color = INSTRUMENTS.find((i) => i.id === id).color;
+  const color = instrumentById[id].color;
   s.root.classList.toggle('active', active);
   s.root.style.borderColor = active ? color : '';
   s.state.textContent = active ? stateText : '—';
@@ -737,60 +819,38 @@ function onResults(results) {
 
   const dets = [];
   if (results.multiHandLandmarks) {
-    results.multiHandLandmarks.forEach((landmarks, i) => {
-      const label = results.multiHandedness && results.multiHandedness[i] && results.multiHandedness[i].label;
-      dets.push({ landmarks, twist: handTwist(landmarks, isRightHand(label)) });
-    });
+    results.multiHandLandmarks.forEach((landmarks) => dets.push({ landmarks }));
   }
 
   const live = matchHands(dets);
 
-  // Only the back-to-palm half of a flip advances the instrument. Showing the
-  // back of the hand keeps playing the current one, so a full turn-and-return
-  // is a single step — and a hand resting palm-down can't drift forward.
-  //
-  // A new side only takes effect after it has been held clearly for
-  // ORIENTATION_HOLD frames in a row. Anything short of that — noise, a hand
-  // waved through an angle, a momentary misread — never reaches the commit and
-  // leaves the current instrument alone.
-  live.forEach((h) => {
-    const t = h.track;
-    const side = twistSide(h.twist);
-
-    if (side === null || side === t.orientation) {
-      t.pending = null;
-      t.pendingFrames = 0;
-      return;
-    }
-
-    if (t.pending === side) t.pendingFrames++;
-    else { t.pending = side; t.pendingFrames = 1; }
-
-    if (t.pendingFrames < ORIENTATION_HOLD) return;
-
-    const previous = t.orientation;
-    t.orientation = side;
-    t.pending = null;
-    t.pendingFrames = 0;
-    if (previous === 'back' && side === 'palm') {
-      t.instrument = (t.instrument + 1) % INSTRUMENTS.length;
-      t.flash = 1;
+  // Assign by screen position: left to right, two hands per pair. A hand that
+  // moves past another swaps voices with it, which is the only way an
+  // assignment ever changes apart from the cycle button.
+  const ordered = orderHands(live);
+  const pairsInUse = Math.ceil(ordered.length / 2);
+  ordered.forEach((h, i) => {
+    const id = pairSet(Math.floor(i / 2))[i % 2];
+    if (h.track.instrument !== id) {
+      if (h.track.instrument !== null) h.track.flash = 1;
+      h.track.instrument = id;
     }
   });
+  pairBoxes.forEach((box, i) => box.root.classList.toggle('live', i < pairsInUse));
 
   // any number of hands can land on the same instrument — they're collected
   // per instrument and merged below rather than fighting over one slot
   const byInst = {};
   INSTRUMENT_IDS.forEach((id) => { byInst[id] = []; });
-  live.forEach((h) => byInst[INSTRUMENTS[h.track.instrument].id].push(h.landmarks));
+  live.forEach((h) => byInst[h.track.instrument].push(h.landmarks));
 
   live.forEach((h) => {
-    const inst = INSTRUMENTS[h.track.instrument];
+    const inst = instrumentById[h.track.instrument];
     if (window.drawConnectors) {
       drawConnectors(ctx2d, h.landmarks, HAND_CONNECTIONS, { color: inst.color, lineWidth: 2 });
       drawLandmarks(ctx2d, h.landmarks, { color: '#ffffff', lineWidth: 1, radius: 3 });
     }
-    // name the instrument on the hand itself — with eight voices in the cycle,
+    // name the instrument on the hand itself — with several hands on screen,
     // the rack alone doesn't tell a player which one is theirs.
     //
     // The canvas element is CSS-mirrored, which is what makes the skeletons line
@@ -812,17 +872,6 @@ function onResults(results) {
     ctx2d.scale(-1, 1);
     ctx2d.fillText(inst.label.toUpperCase(), 0, 0);
     ctx2d.restore();
-    // arming ring: fills while a new side is being held, so the hold time reads
-    // as deliberate feedback rather than as the app failing to respond
-    if (h.track.pendingFrames > 0) {
-      ctx2d.globalAlpha = 0.85;
-      ctx2d.beginPath();
-      ctx2d.arc(px, py, 38, -Math.PI / 2, -Math.PI / 2 + (h.track.pendingFrames / ORIENTATION_HOLD) * Math.PI * 2);
-      ctx2d.strokeStyle = '#ffffff';
-      ctx2d.lineWidth = 4;
-      ctx2d.lineCap = 'round';
-      ctx2d.stroke();
-    }
     if (h.track.flash > 0) {
       ctx2d.globalAlpha = h.track.flash;
       ctx2d.beginPath();
@@ -969,7 +1018,7 @@ const hands = new Hands({
   locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
 });
 hands.setOptions({
-  maxNumHands: 4,
+  maxNumHands: 6,   // three pairs of hands, the full rack at once
   modelComplexity: 1,
   minDetectionConfidence: 0.6,
   minTrackingConfidence: 0.6,
@@ -1077,12 +1126,33 @@ startBtn.addEventListener('click', async () => {
   }
 });
 
-// Space toggles performance mode. This is a stage control, not an instrument
-// control — everything musical stays gesture-only.
+// The cycle button shifts every pair on to the next set of voices at once, so
+// the hands keep their places and only the mapping moves under them.
+cycleBtn.addEventListener('click', (e) => {
+  e.stopPropagation(); // the stage listener below would hide the UI otherwise
+  pairOffset = (pairOffset + 1) % PAIR_SETS.length;
+  renderPairs();
+  cycleBtn.blur();  // so the next space press toggles the UI, not this button
+});
+
+// Space or a tap on the background toggles performance mode. These are stage
+// controls, not instrument controls — everything musical stays gesture-only.
+function toggleChrome() {
+  document.body.classList.toggle('chrome-hidden');
+}
+
 window.addEventListener('keydown', (e) => {
   if (e.code !== 'Space') return;
   e.preventDefault(); // otherwise space re-fires the still-focused start button
-  document.body.classList.toggle('chrome-hidden');
+  toggleChrome();
+});
+
+// The rack and the HUD are pointer-events: none, so a tap anywhere but the
+// cycle button lands here.
+stage.addEventListener('click', (e) => {
+  if (!audioStarted) return;
+  if (e.target.closest('#cycleBtn')) return;
+  toggleChrome();
 });
 
 statusEl.textContent = 'click start';
