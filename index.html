@@ -167,7 +167,7 @@
 </head>
 <body>
 <div id="stage">
-  <video id="video" playsinline></video>
+  <video id="video" playsinline webkit-playsinline muted autoplay></video>
   <canvas id="canvas"></canvas>
   <div id="rack"></div>
   <div id="hud">
@@ -977,8 +977,62 @@ hands.onResults(onResults);
 
 let camera = null;
 
+// iOS Safari: getUserMedia (even video-only) flips the audio session to
+// play-and-record, which routes Web Audio to the earpiece and also lets the
+// Ring/Silent switch mute the speaker. Headphones still work, so it looks
+// like "sound only through headphones". Force a music-playback session and
+// keep a silent HTML audio element running so iOS treats this as media.
+function setPlaybackSession() {
+  try {
+    if (navigator.audioSession) navigator.audioSession.type = 'playback';
+  } catch (err) { /* Audio Session API is Safari-only and still shifting */ }
+}
+
+const silentUnlock = new Audio(
+  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA'
+);
+silentUnlock.loop = true;
+silentUnlock.setAttribute('playsinline', '');
+silentUnlock.playsInline = true;
+
+function muteCameraVideo() {
+  video.muted = true;
+  video.defaultMuted = true;
+  video.volume = 0;
+  video.playsInline = true;
+  video.setAttribute('playsinline', '');
+  video.setAttribute('webkit-playsinline', '');
+  const stream = video.srcObject;
+  if (stream && stream.getAudioTracks) {
+    stream.getAudioTracks().forEach((track) => {
+      track.stop();
+      stream.removeTrack(track);
+    });
+  }
+}
+
+async function unlockIOSAudio() {
+  muteCameraVideo();
+  setPlaybackSession();
+  try { await silentUnlock.play(); } catch (err) { /* play() can race the gesture */ }
+  try { await Tone.context.resume(); } catch (err) { /* context may not exist yet */ }
+}
+
+if (navigator.audioSession) {
+  navigator.audioSession.addEventListener('statechange', () => {
+    if (audioStarted) setPlaybackSession();
+  });
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!audioStarted || document.hidden) return;
+  unlockIOSAudio();
+});
+
 startBtn.addEventListener('click', async () => {
   try {
+    muteCameraVideo();
+    await unlockIOSAudio();
     await Tone.start();
     audioStarted = true;
     // continuous sources have to be started once; their level stays at 0 until
@@ -997,6 +1051,9 @@ startBtn.addEventListener('click', async () => {
       height: 720,
     });
     await camera.start();
+    // getUserMedia just switched iOS back to a call-style route — undo that
+    // and resume Web Audio, which Safari often suspends at the same time.
+    await unlockIOSAudio();
 
     startOverlay.style.display = 'none';
     startBtn.blur(); // so the first space press toggles the UI, not this button
