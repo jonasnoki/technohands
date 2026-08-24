@@ -275,6 +275,35 @@ const startOverlay = document.getElementById('startOverlay');
 const startBtn = document.getElementById('startBtn');
 const startHint = document.getElementById('startHint');
 
+// --------------------------------------------------------------- audio first
+// The audio graph renders on its own thread, but Tone schedules every note from
+// the main thread — the same thread the hand tracker blocks for tens of
+// milliseconds at a stretch. Miss a scheduling deadline and the note is already
+// in the past when it is written, which is what the dropouts are.
+//
+// Two settings buy that scheduler room. 'playback' asks the platform for the
+// largest output buffer it will give, so the audio thread can ride out a stall.
+// The long lookAhead lets the main thread be a quarter second late without the
+// buffer ever running dry.
+//
+// The cost is control latency: a gesture takes longer to be heard. That is the
+// right trade for this instrument, because hands set state rather than strike
+// notes — the Transport does the striking, and its timing stays exact.
+//
+// This must run before any node is built, or the nodes land on the old context.
+Tone.setContext(new Tone.Context({
+  latencyHint: 'playback',
+  lookAhead: 0.25,
+  updateInterval: 0.06,
+}));
+
+// `Tone.Transport` and `Tone.Destination` are bound to the context that existed
+// when the library loaded, and setContext does not move them. Reaching for them
+// after the swap gives a transport on a suspended context — a clock that never
+// ticks and an instrument that never sounds. These getters resolve against the
+// live context, so everything stays on one clock.
+const transport = Tone.getTransport();
+
 // ---------------------------------------------------------------- audio graph
 // Everything funnels into masterBus, then glue compression and a limiter. The
 // global filter/delay/reverb that used to sit here went away with the FX hand —
@@ -440,7 +469,7 @@ const shimmerSynth = new Tone.PolySynth(Tone.Synth, {
 shimmerSynth.volume.value = -20;
 
 // ------------------------------------------------------------------- patterns
-Tone.Transport.bpm.value = 132;
+transport.bpm.value = 132;
 const SIXTEENTH = Tone.Time('16n').toSeconds();
 
 // half-note rumble under the four-on-the-floor kick — on every kick it turns to
@@ -573,7 +602,7 @@ const TRACK_LABELS = {
 
 let step = 0;
 let bar = 0;
-Tone.Transport.scheduleRepeat((time) => {
+transport.scheduleRepeat((time) => {
   const cyclePos = (bar % 2) * 16 + step;
 
   const d = S.drums.gates;
@@ -1076,13 +1105,45 @@ function onResults(results) {
 const hands = new Hands({
   locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
 });
-hands.setOptions({
+const HAND_OPTIONS = {
   maxNumHands: 6,   // three pairs of hands, the full rack at once
   modelComplexity: 1,
   minDetectionConfidence: 0.6,
   minTrackingConfidence: 0.6,
-});
+};
+hands.setOptions(HAND_OPTIONS);
 hands.onResults(onResults);
+
+// ------------------------------------------------------- pacing the tracker
+// The tracker and the note scheduler share one thread, and the tracker costs
+// far more. So the vision loop is held to a share of the wall clock: it times
+// itself and waits out the rest, which leaves the scheduler the gaps it needs
+// to place the next notes before their deadline.
+//
+// On a fast machine the wait rounds down to nothing and tracking runs at the
+// camera rate. On a slow one it settles at eight or ten detections a second —
+// visibly behind the hands, and inaudible in the music. That is the trade.
+const VISION_DUTY = 0.5;               // share of the thread the tracker may use
+const VISION_MIN_WAIT = 1000 / 60;
+const VISION_MAX_WAIT = 1000 / 8;
+const SIMPLIFY_ABOVE_MS = 45;          // a detection this slow needs the lite model
+let visionCost = 16;                   // rolling mean, ms per detection
+let visionSamples = 0;
+let lastSend = 0;
+let modelSimplified = false;
+
+// A machine that stays this far behind is not going to catch up by waiting
+// longer, and at eight frames a second the instrument stops being playable.
+// The lite landmark model is the last lever: less exact on fast motion, but it
+// hands the thread back sooner. This fires once, and never on a fast machine.
+function simplifyModelIfSlow() {
+  if (modelSimplified || visionSamples < 90 || visionCost < SIMPLIFY_ABOVE_MS) return;
+  modelSimplified = true;
+  try {
+    hands.setOptions({ ...HAND_OPTIONS, modelComplexity: 0 });
+    visionCost = SIMPLIFY_ABOVE_MS / 2;  // let the mean re-measure the new model
+  } catch (err) { /* the graph refused to reconfigure — keep the heavy model */ }
+}
 
 // ------------------------------------------------------------------- camera
 // Phones have at least two cameras and the rear one is the interesting option:
@@ -1105,7 +1166,16 @@ function buildCamera() {
   return new Camera(video, {
     onFrame: async () => {
       if (token !== frameToken || !video.videoWidth) return;
+      const now = performance.now();
+      const wait = clamp(visionCost / VISION_DUTY, VISION_MIN_WAIT, VISION_MAX_WAIT);
+      if (now - lastSend < wait) return;
+      lastSend = now;
       await hands.send({ image: video });
+      // send() resolves once onResults has run, so this covers the detection
+      // and the drawing together — the whole main-thread cost of one frame
+      visionCost = visionCost * 0.9 + (performance.now() - now) * 0.1;
+      visionSamples++;
+      simplifyModelIfSlow();
     },
     width: 1280,
     height: 720,
@@ -1315,7 +1385,7 @@ startBtn.addEventListener('click', async () => {
     atmosFilter.start();
     chordChorus.start();
     whaleChorus.start();
-    Tone.Transport.start();
+    transport.start();
 
     await cameraReady;
     // getUserMedia just switched iOS back to a call-style route — undo that
