@@ -247,7 +247,7 @@
   <div id="hud">
     <div>
       <h1>technohands</h1>
-      <p>Stand anywhere, raise a hand. Instruments stay fixed to hands: the first pair of hands on screen plays the first pair of voices below, the next pair the next, and so on left to right. A closed fist means silence. Press <strong>cycle pairs</strong> to shift every pair to the next set of voices. One 132bpm clock, so nothing drifts out of time.</p>
+      <p>Stand anywhere, raise a hand. Instruments stay fixed to hands: the first pair of hands on screen plays the first pair of voices below, the next pair the next, and so on left to right. A closed fist means silence. Press <strong>cycle pairs</strong> to shift every pair to the next set of voices. The rack also shifts by itself every three minutes, and waits until no hands are up. One 132bpm clock, so nothing drifts out of time.</p>
       <p class="hudKey"><kbd>space</kbd> or a tap on the background &mdash; bare camera, no interface and no hand overlay</p>
     </div>
     <div id="status">loading&hellip;</div>
@@ -283,18 +283,23 @@ const startHint = document.getElementById('startHint');
 //
 // Two settings buy that scheduler room. 'playback' asks the platform for the
 // largest output buffer it will give, so the audio thread can ride out a stall.
-// The long lookAhead lets the main thread be a quarter second late without the
-// buffer ever running dry.
+// The lookAhead lets the main thread be half a second late — four sixteenths at
+// 132bpm — without the buffer ever running dry.
 //
-// The cost is control latency: a gesture takes longer to be heard. That is the
-// right trade for this instrument, because hands set state rather than strike
-// notes — the Transport does the striking, and its timing stays exact.
+// The cost is control latency: a gesture takes that long to be heard. It costs
+// this instrument very little, because the hands only set state. Every voice is
+// triggered by the Transport on the step grid, so a hand that arrives late for
+// one step simply plays from the next one, in time either way.
+//
+// updateInterval stays well under the lookAhead. The scheduler then gets five
+// attempts to fill each window, and a stall has to swallow all five in a row
+// before anything is heard.
 //
 // This must run before any node is built, or the nodes land on the old context.
 Tone.setContext(new Tone.Context({
   latencyHint: 'playback',
-  lookAhead: 0.25,
-  updateInterval: 0.06,
+  lookAhead: 0.5,
+  updateInterval: 0.1,
 }));
 
 // `Tone.Transport` and `Tone.Destination` are bound to the context that existed
@@ -854,6 +859,20 @@ function renderPairs() {
 }
 renderPairs();
 
+// The rack also shifts on its own, so a room that keeps playing does not spend
+// the whole night on one pair of voices. It never shifts under a player: the
+// timer only arms the change, and the change waits for a frame with nobody on
+// screen. A long take is therefore never interrupted, and the voices are always
+// new when the next pair of hands goes up. Cycling by hand restarts the wait.
+const AUTO_CYCLE_MS = 3 * 60 * 1000;
+let lastCycleAt = performance.now();
+
+function cyclePairs() {
+  pairOffset = (pairOffset + 1) % PAIR_SETS.length;
+  lastCycleAt = performance.now();
+  renderPairs();
+}
+
 // The rack changes a few times a second at most, but this runs on every frame
 // of the video. Each slot therefore remembers what it last wrote and touches
 // the DOM only on a real change — otherwise the browser recalculates styles
@@ -899,6 +918,12 @@ function onResults(results) {
   }
 
   const live = matchHands(dets);
+
+  // `tracked`, not `live`: a hand holds its slot for a few frames after the
+  // tracker loses it, and a swap inside that gap would land under a hand that
+  // never left. This runs before the assignment below, so the new voices take
+  // hold on this very frame.
+  if (!tracked.length && performance.now() - lastCycleAt > AUTO_CYCLE_MS) cyclePairs();
 
   // Assign by screen position: left to right, two hands per pair. A hand that
   // moves past another swaps voices with it, which is the only way an
@@ -1397,6 +1422,7 @@ startBtn.addEventListener('click', async () => {
     startOverlay.style.display = 'none';
     startBtn.blur(); // so the first space press toggles the UI, not this button
     statusEl.textContent = 'raise a hand to play';
+    lastCycleAt = performance.now(); // the wait starts with the set, not with the page load
   } catch (err) {
     startBtn.disabled = false;
     const message = err && err.message ? err.message : String(err);
@@ -1410,8 +1436,7 @@ startBtn.addEventListener('click', async () => {
 // the hands keep their places and only the mapping moves under them.
 cycleBtn.addEventListener('click', (e) => {
   e.stopPropagation(); // the stage listener below would hide the UI otherwise
-  pairOffset = (pairOffset + 1) % PAIR_SETS.length;
-  renderPairs();
+  cyclePairs();
   cycleBtn.blur();  // so the next space press toggles the UI, not this button
 });
 
