@@ -253,8 +253,8 @@
   <div id="hud">
     <div>
       <!-- bump this on every push, so a phone can be checked against the build -->
-      <h1>technohands <span class="ver">v1.0</span></h1>
-      <p>Stand anywhere, raise a hand. Instruments stay fixed to hands: the first pair of hands on screen plays the first pair of voices below, the next pair the next, and so on left to right. A closed fist means silence. Press <strong>cycle pairs</strong> to deal the eight voices into new pairs. That also happens by itself every three minutes, and waits until no hands are up. One 132bpm clock, so nothing drifts out of time.</p>
+      <h1>technohands <span class="ver">v1.3</span></h1>
+      <p>Stand anywhere, raise a hand. Instruments stay fixed to hands: the first pair of hands on screen plays the first pair of voices below, the next pair the next, and so on left to right. A closed fist means silence. Turn one hand over, fingers spread and pointing down, and hold it: that hand alone steps to the next voice and keeps it. Press <strong>cycle pairs</strong> to deal all eight voices into new pairs and put every hand back on the map. That also happens by itself every three minutes, and waits until no hands are up. One 132bpm clock, so nothing drifts out of time.</p>
       <p class="hudKey"><kbd>space</kbd> or a tap on the background &mdash; hide interface, hands keep playing</p>
     </div>
     <div id="status">loading&hellip;</div>
@@ -887,15 +887,21 @@ function palmLength(landmarks) {
   return Math.hypot(landmarks[9].x - landmarks[0].x, landmarks[9].y - landmarks[0].y);
 }
 
-function looksLikeSameHand(a, b) {
+// How far apart two hands are, in palm lengths: the mean distance between
+// corresponding landmarks over hand size. Near zero means one hand seen twice,
+// near one means two hands touching, and it holds at any camera distance.
+function handGap(a, b) {
   let sum = 0;
-  for (let i = 0; i < a.landmarks.length; i++) {
-    sum += Math.hypot(a.landmarks[i].x - b.landmarks[i].x, a.landmarks[i].y - b.landmarks[i].y);
+  for (let i = 0; i < a.length; i++) {
+    sum += Math.hypot(a[i].x - b[i].x, a[i].y - b[i].y);
   }
-  const mean = sum / a.landmarks.length;
-  const palm = (palmLength(a.landmarks) + palmLength(b.landmarks)) / 2;
-  if (palm <= 0) return false;
-  return mean / palm < GHOST_DISTANCE;
+  const palm = (palmLength(a) + palmLength(b)) / 2;
+  if (palm <= 0) return Infinity;
+  return (sum / a.length) / palm;
+}
+
+function looksLikeSameHand(a, b) {
+  return handGap(a.landmarks, b.landmarks) < GHOST_DISTANCE;
 }
 
 // Of two copies the confident one stays. MediaPipe scores each detection, and
@@ -909,6 +915,65 @@ function dropGhostHands(dets) {
     if (det.score > kept[twin].score) kept[twin] = det;
   });
   return kept;
+}
+
+// -------------------------------------------------------------- the turnover
+// One hand turned over — fingers spread, pointing at the floor — held for most
+// of a second. That hand alone steps to the next voice in the rack order, and
+// keeps it. Nobody else's hand moves, which is the point: a player can go
+// looking for a voice without taking the room's instruments with them.
+//
+// Every part of it stays clear of playing. Playing happens with the fingers up:
+// the tilt test alone puts this more than 120 degrees away from any pose that
+// makes a sound, and the acid hand's own tilt switch tops out at 32 degrees.
+// The spread rules out the one inverted hand that happens by accident, an arm
+// hanging at the side, because a resting hand curls. And an upside-down hand
+// reads as a fist to the instruments, so the gesture is silent while it is made
+// rather than playing a chord on its way through.
+//
+// It has to be held, or a hand dropping out of frame past the wrong angle would
+// change voice mid-take. After it fires, the hand must come back up before it
+// can fire again, or holding the pose would walk through the whole rack.
+const TURNOVER_TILT = 2.2;      // radians off vertical; straight down is π
+const TURNOVER_SPREAD = 0.5;    // fingertip polygon, same scale the pads use
+const TURNOVER_HOLD_MS = 800;
+
+function handIsTurnedOver(landmarks) {
+  if (Math.abs(handTilt(landmarks)) < TURNOVER_TILT) return false;
+  if (polygonOpenness(landmarks) < TURNOVER_SPREAD) return false;
+  // fingers extended downward: every tip below its own knuckle. `fingerStates`
+  // cannot answer this — it tests for tips above, which is extension only for a
+  // hand the right way up.
+  const tips = [8, 12, 16, 20];
+  const pips = [6, 10, 14, 18];
+  return tips.every((tip, i) => landmarks[tip].y > landmarks[pips[i]].y + 0.02);
+}
+
+// The order is the rack's own, the order the INSTRUMENTS table is written in.
+// A hand that has never held a voice starts at the top of it.
+function stepInstrument(track) {
+  const at = INSTRUMENT_IDS.indexOf(track.instrument);
+  track.instrument = INSTRUMENT_IDS[(at + 1) % INSTRUMENT_IDS.length];
+  track.picked = true;
+  track.flash = 1;   // the same ring a positional change draws
+}
+
+function checkTurnover(live) {
+  const now = performance.now();
+  live.forEach((h) => {
+    const t = h.track;
+    if (!handIsTurnedOver(h.landmarks)) {
+      t.turnSince = 0;
+      t.turnArmed = true;
+      return;
+    }
+    if (!t.turnArmed) return;
+    if (!t.turnSince) { t.turnSince = now; return; }
+    if (now - t.turnSince < TURNOVER_HOLD_MS) return;
+    t.turnArmed = false;
+    t.turnSince = 0;
+    stepInstrument(t);
+  });
 }
 
 // -------------------------------------------------------------- hand tracking
@@ -938,7 +1003,13 @@ function matchHands(dets) {
       t = tracked[best];
       used[best] = true;
     } else {
-      t = { id: nextHandId++, instrument: null, flash: 0, x: wx, y: wy, missing: 0 };
+      // `picked` marks a hand that chose its own voice by turning over, which
+      // takes it out of the positional assignment until the next deal. The two
+      // turn fields are per hand, so several players can turn over at once.
+      t = {
+        id: nextHandId++, instrument: null, flash: 0, x: wx, y: wy, missing: 0,
+        picked: false, turnSince: 0, turnArmed: true,
+      };
       tracked.push(t);
       used.push(true);
     }
@@ -995,6 +1066,9 @@ let lastCycleAt = performance.now();
 
 function cyclePairs() {
   pairSets = dealDifferentPairs();
+  // a deal is a fresh start for the whole rack, so hands that had picked their
+  // own voice by turning over come back under the positional map
+  tracked.forEach((t) => { t.picked = false; });
   lastCycleAt = performance.now();
   renderPairs();
 }
@@ -1048,6 +1122,10 @@ function onResults(results) {
 
   const live = matchHands(dropGhostHands(dets));
 
+  // This runs before the assignment below, so the hand that asked for new
+  // voices is holding one on this very frame.
+  checkTurnover(live);
+
   // `tracked`, not `live`: a hand holds its slot for a few frames after the
   // tracker loses it, and a swap inside that gap would land under a hand that
   // never left. This runs before the assignment below, so the new voices take
@@ -1056,10 +1134,15 @@ function onResults(results) {
 
   // Assign by screen position: left to right, two hands per pair. A hand that
   // moves past another swaps voices with it, which is the only way an
-  // assignment ever changes apart from the cycle button.
+  // assignment ever changes apart from a deal or a turnover.
+  //
+  // A hand that turned over keeps what it picked, but still holds its place in
+  // the order. Its neighbours therefore keep the voices they had, instead of
+  // every hand to its right shifting along one.
   const ordered = orderHands(live);
   const pairsInUse = Math.ceil(ordered.length / 2);
   ordered.forEach((h, i) => {
+    if (h.track.picked) return;
     const id = pairSet(Math.floor(i / 2))[i % 2];
     if (h.track.instrument !== id) {
       if (h.track.instrument !== null) h.track.flash = 1;
