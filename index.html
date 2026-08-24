@@ -827,6 +827,51 @@ function orderHands(live) {
   return handOrder.map((id) => byId.get(id));
 }
 
+// ------------------------------------------------------------ ghost hands
+// MediaPipe does not promise one detection per hand. Its palm detector can
+// return two overlapping boxes for the same hand, and with six slots to fill
+// and fewer hands in front of the camera it does so regularly — two landmark
+// sets in the same place, with the same fingers up.
+//
+// Downstream, a ghost is indistinguishable from a real hand: it takes an
+// identity, claims the next instrument, and a soloist quietly plays two voices.
+// So ghosts are dropped here, before anything else sees them.
+//
+// The test is the mean distance between corresponding landmarks, measured
+// against palm length so that it holds at any camera distance. A copy sits
+// within a few percent of a palm. Two real hands, even held side by side with
+// the fingers touching, stay a full palm apart or more, so the threshold has a
+// wide margin on both sides and never merges two players.
+const GHOST_DISTANCE = 0.35;   // in palm lengths
+
+function palmLength(landmarks) {
+  return Math.hypot(landmarks[9].x - landmarks[0].x, landmarks[9].y - landmarks[0].y);
+}
+
+function looksLikeSameHand(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.landmarks.length; i++) {
+    sum += Math.hypot(a.landmarks[i].x - b.landmarks[i].x, a.landmarks[i].y - b.landmarks[i].y);
+  }
+  const mean = sum / a.landmarks.length;
+  const palm = (palmLength(a.landmarks) + palmLength(b.landmarks)) / 2;
+  if (palm <= 0) return false;
+  return mean / palm < GHOST_DISTANCE;
+}
+
+// Of two copies the confident one stays. MediaPipe scores each detection, and
+// the ghost usually scores lower — but the check never depends on that, since
+// keeping either copy of the same hand gives the same instrument either way.
+function dropGhostHands(dets) {
+  const kept = [];
+  dets.forEach((det) => {
+    const twin = kept.findIndex((k) => looksLikeSameHand(k, det));
+    if (twin < 0) { kept.push(det); return; }
+    if (det.score > kept[twin].score) kept[twin] = det;
+  });
+  return kept;
+}
+
 // -------------------------------------------------------------- hand tracking
 // MediaPipe gives no stable hand IDs and reorders its results between frames,
 // so per-hand state needs identity of our own. Nearest-wrist matching is enough
@@ -956,10 +1001,13 @@ function onResults(results) {
 
   const dets = [];
   if (results.multiHandLandmarks) {
-    results.multiHandLandmarks.forEach((landmarks) => dets.push({ landmarks }));
+    results.multiHandLandmarks.forEach((landmarks, i) => {
+      const handedness = results.multiHandedness && results.multiHandedness[i];
+      dets.push({ landmarks, score: handedness ? handedness.score : 1 });
+    });
   }
 
-  const live = matchHands(dets);
+  const live = matchHands(dropGhostHands(dets));
 
   // `tracked`, not `live`: a hand holds its slot for a few frames after the
   // tracker loses it, and a swap inside that gap would land under a hand that
