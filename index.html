@@ -199,8 +199,7 @@
     font-family: inherit;
     font-size: 11px;
   }
-  /* Performance mode: the interface fades out and the hand overlay stops being
-     drawn, since it lives on the canvas rather than in the DOM.
+  /* Performance mode: the interface fades out and the hands keep playing.
      visibility takes the faded interface out of the compositor as well. At
      opacity 0 the browser still runs a backdrop-filter blur pass for every
      button and every rack slot, over a canvas that repaints on each frame.
@@ -247,8 +246,8 @@
   <div id="hud">
     <div>
       <h1>technohands</h1>
-      <p>Stand anywhere, raise a hand. Instruments stay fixed to hands: the first pair of hands on screen plays the first pair of voices below, the next pair the next, and so on left to right. A closed fist means silence. Press <strong>cycle pairs</strong> to shift every pair to the next set of voices. The rack also shifts by itself every three minutes, and waits until no hands are up. One 132bpm clock, so nothing drifts out of time.</p>
-      <p class="hudKey"><kbd>space</kbd> or a tap on the background &mdash; bare camera, no interface and no hand overlay</p>
+      <p>Stand anywhere, raise a hand. Instruments stay fixed to hands: the first pair of hands on screen plays the first pair of voices below, the next pair the next, and so on left to right. A closed fist means silence. Press <strong>cycle pairs</strong> to deal the eight voices into new pairs. That also happens by itself every three minutes, and waits until no hands are up. One 132bpm clock, so nothing drifts out of time.</p>
+      <p class="hudKey"><kbd>space</kbd> or a tap on the background &mdash; hide interface, hands keep playing</p>
     </div>
     <div id="status">loading&hellip;</div>
   </div>
@@ -570,7 +569,7 @@ const SONAR_SPACING = [0, 32, 16, 8, 4, 2];
 const PLUCK_PATTERN = [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0];
 
 // --------------------------------------------------------------------- state
-// Every voice, keyed by id. PAIR_SETS below decides which pair of hands gets
+// Every voice, keyed by id. The pair deal below decides which pair of hands gets
 // which two of these; this table only carries the label and the colour.
 const INSTRUMENTS = [
   { id: 'drums', label: 'drums', color: '#55efc4' },
@@ -735,19 +734,62 @@ function screenX(landmarks) {
   return mirrored ? 1 - landmarks[0].x : landmarks[0].x;
 }
 
-const PAIR_SETS = [
+// The opening deal, by hand: a kit under a bassline, the two calls answering
+// each other, the two pads together, the second kit under the pluck.
+const OPENING_PAIRS = [
   ['drums', 'acid'],
   ['whale', 'sonar'],
   ['chords', 'shimmer'],
   ['euclid', 'pluck'],
 ];
 
-// The cycle button rotates which set the first pair gets; every later pair
-// follows along, so the sets never collide and no two hands share a voice.
-let pairOffset = 0;
+// A cycle re-deals all eight voices into four new pairs rather than rotating a
+// fixed table, so the same two instruments do not spend the night side by side.
+// Two rules keep a deal playable:
+//
+// The first two pairs each hold one of the drum kits. One player at the front
+// of the room always has a beat under one hand and something to play against it
+// with the other, which a free shuffle would take away often enough to matter.
+//
+// And a deal never repeats the one before it. Four pairs out of eight voices is
+// a small space, and repeating a deal reads as the cycle having failed.
+const KIT_IDS = ['drums', 'euclid'];
+let pairSets = OPENING_PAIRS;
+
+function shuffled(list) {
+  const out = list.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const swap = out[i];
+    out[i] = out[j];
+    out[j] = swap;
+  }
+  return out;
+}
+
+function dealPairs() {
+  const kits = shuffled(KIT_IDS);
+  const rest = shuffled(INSTRUMENT_IDS.filter((id) => !KIT_IDS.includes(id)));
+  // shuffle inside each pair too, so a kit is not always the left hand
+  return [
+    shuffled([kits[0], rest[0]]),
+    shuffled([kits[1], rest[1]]),
+    shuffled([rest[2], rest[3]]),
+    shuffled([rest[4], rest[5]]),
+  ];
+}
+
+function dealDifferentPairs() {
+  const before = JSON.stringify(pairSets);
+  for (let tries = 0; tries < 20; tries++) {
+    const deal = dealPairs();
+    if (JSON.stringify(deal) !== before) return deal;
+  }
+  return dealPairs();   // twenty identical deals is not going to happen
+}
 
 function pairSet(pairIndex) {
-  return PAIR_SETS[(pairIndex + pairOffset) % PAIR_SETS.length];
+  return pairSets[pairIndex % pairSets.length];
 }
 
 // A plain sort by x would let two hands held close together trade voices every
@@ -844,7 +886,7 @@ INSTRUMENTS.forEach((inst) => {
   rackEls[inst.id] = { root: el, state: el.querySelector('.slotState') };
 });
 
-const pairBoxes = PAIR_SETS.map((_, i) => {
+const pairBoxes = OPENING_PAIRS.map((_, i) => {
   const box = document.createElement('div');
   box.className = 'pair';
   box.innerHTML = `<div class="pairTag">pair ${i + 1}</div><div class="pairSlots"></div>`;
@@ -868,7 +910,7 @@ const AUTO_CYCLE_MS = 3 * 60 * 1000;
 let lastCycleAt = performance.now();
 
 function cyclePairs() {
-  pairOffset = (pairOffset + 1) % PAIR_SETS.length;
+  pairSets = dealDifferentPairs();
   lastCycleAt = performance.now();
   renderPairs();
 }
@@ -906,11 +948,11 @@ function onResults(results) {
   ctx2d.save();
   ctx2d.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Performance mode drops every visual: no skeletons, no labels, no rings, and
-  // no rack or status updates either. Tracking, assignment and sound all run
-  // exactly as before — the work that disappears is only the drawing and the
-  // DOM writes that nobody can see.
-  const overlay = !document.body.classList.contains('chrome-hidden');
+  // Performance mode hides the interface, never the hands — the skeletons are
+  // the picture, since the video element itself stays hidden. What it does drop
+  // is the rack and status writes, which nobody can see while the dock is
+  // faded out and which otherwise run on every frame of video.
+  const interfaceVisible = !document.body.classList.contains('chrome-hidden');
 
   const dets = [];
   if (results.multiHandLandmarks) {
@@ -937,7 +979,7 @@ function onResults(results) {
       h.track.instrument = id;
     }
   });
-  if (overlay) pairBoxes.forEach((box, i) => box.root.classList.toggle('live', i < pairsInUse));
+  if (interfaceVisible) pairBoxes.forEach((box, i) => box.root.classList.toggle('live', i < pairsInUse));
 
   // any number of hands can land on the same instrument — they're collected
   // per instrument and merged below rather than fighting over one slot
@@ -946,12 +988,6 @@ function onResults(results) {
   live.forEach((h) => byInst[h.track.instrument].push(h.landmarks));
 
   live.forEach((h) => {
-    if (!overlay) {
-      // the flash keeps decaying while nothing is drawn, or a ring would be
-      // sitting there waiting to fire the moment the overlay returns
-      h.track.flash = Math.max(0, h.track.flash - 0.06);
-      return;
-    }
     const inst = instrumentById[h.track.instrument];
     if (window.drawConnectors) {
       drawConnectors(ctx2d, h.landmarks, HAND_CONNECTIONS, { color: inst.color, lineWidth: 2 });
@@ -1114,7 +1150,7 @@ function onResults(results) {
 
   // Nothing below this point makes sound. It is skipped outright while the
   // interface is hidden, and rewritten from the next frame when it returns.
-  if (!overlay) return;
+  if (!interfaceVisible) return;
 
   INSTRUMENT_IDS.forEach((id) => {
     const extra = byInst[id].length > 1 ? ` +${byInst[id].length - 1}` : '';
@@ -1432,8 +1468,8 @@ startBtn.addEventListener('click', async () => {
   }
 });
 
-// The cycle button shifts every pair on to the next set of voices at once, so
-// the hands keep their places and only the mapping moves under them.
+// The cycle button deals new pairs at once, under whatever hands are up. That
+// is the one place a swap mid-take is wanted: somebody asked for it.
 cycleBtn.addEventListener('click', (e) => {
   e.stopPropagation(); // the stage listener below would hide the UI otherwise
   cyclePairs();
