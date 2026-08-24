@@ -67,6 +67,11 @@
   }
   .dockBtn:active { background: rgba(255,255,255,.16); }
   .dockBtn:disabled { opacity: .5; }
+  .dockBtn.on {
+    color: #0b0b10;
+    background: #ffeaa7;
+    border-color: #ffeaa7;
+  }
   #rack {
     display: flex;
     flex-wrap: wrap;
@@ -227,6 +232,7 @@
     <div id="dockBtns">
       <button id="cycleBtn" class="dockBtn" type="button">cycle pairs</button>
       <button id="flipBtn" class="dockBtn" type="button" hidden>back camera</button>
+      <button id="torchBtn" class="dockBtn" type="button" hidden>light on</button>
     </div>
     <div id="rack"></div>
   </div>
@@ -252,6 +258,7 @@
 const stage = document.getElementById('stage');
 const cycleBtn = document.getElementById('cycleBtn');
 const flipBtn = document.getElementById('flipBtn');
+const torchBtn = document.getElementById('torchBtn');
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx2d = canvas.getContext('2d');
@@ -1050,6 +1057,7 @@ let camera = null;
 let facingMode = 'user';
 let mirrored = true;
 let switchingCamera = false;
+let torchOn = false;
 // camera_utils keeps its own requestAnimationFrame loop and older builds have
 // no stop(), so a replaced Camera can keep pumping frames at the same video
 // element. Only the newest generation may talk to MediaPipe — two loops feeding
@@ -1078,22 +1086,38 @@ async function stopCamera() {
   const stream = video.srcObject;
   if (stream && stream.getTracks) stream.getTracks().forEach((track) => track.stop());
   video.srcObject = null;
+  torchOn = false; // the lamp goes out with the track that carried it
+}
+
+function videoTrack() {
+  const stream = video.srcObject;
+  return stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
 }
 
 // What the camera says it is, once it runs. Phones report 'user' or
 // 'environment'; plain webcams report nothing, and on those a facing switch
 // would do nothing at all.
 function currentFacing() {
-  const stream = video.srcObject;
-  const track = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+  const track = videoTrack();
   const settings = track && track.getSettings ? track.getSettings() : null;
   return settings ? settings.facingMode : undefined;
 }
 
-// A device with one camera, or one that has no notion of facing, gets no
+// The lamp belongs to one camera, usually the rear one, so support has to be
+// re-checked on every switch. Chrome on Android reports it; iOS Safari has no
+// torch constraint at all, so there the button never appears.
+function torchSupported() {
+  const track = videoTrack();
+  const caps = track && track.getCapabilities ? track.getCapabilities() : null;
+  return !!(caps && caps.torch);
+}
+
+// A device with one camera, or one that has no notion of facing, gets no flip
 // button. The full device list only appears once the user has granted camera
 // permission, so this runs after start.
-async function refreshCameraList() {
+async function refreshCameraControls() {
+  torchBtn.hidden = !torchSupported();
+  renderTorchBtn();
   if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
@@ -1105,13 +1129,36 @@ async function refreshCameraList() {
 function renderFlipBtn() {
   flipBtn.textContent = facingMode === 'user' ? 'back camera' : 'front camera';
 }
+
+function renderTorchBtn() {
+  torchBtn.textContent = torchOn ? 'light off' : 'light on';
+  torchBtn.classList.toggle('on', torchOn);
+}
 renderFlipBtn();
+renderTorchBtn();
 
 if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
   navigator.mediaDevices.addEventListener('devicechange', () => {
-    if (audioStarted) refreshCameraList();
+    if (audioStarted) refreshCameraControls();
   });
 }
+
+// The lamp is a constraint on the live track, so it dies with the track and
+// there is nothing to restore on the new camera — the flag just follows.
+torchBtn.addEventListener('click', async (e) => {
+  e.stopPropagation(); // the stage listener would hide the UI otherwise
+  const track = videoTrack();
+  if (!track || !track.applyConstraints || switchingCamera) return;
+  const next = !torchOn;
+  try {
+    await track.applyConstraints({ advanced: [{ torch: next }] });
+    torchOn = next;
+  } catch (err) {
+    statusEl.textContent = 'light unavailable';
+  }
+  renderTorchBtn();
+  torchBtn.blur();  // so the next space press toggles the UI, not this button
+});
 
 async function useCamera(mode) {
   await stopCamera();
@@ -1152,7 +1199,7 @@ flipBtn.addEventListener('click', async (e) => {
     statusEl.textContent = 'camera switch failed';
   }
   renderFlipBtn();
-  refreshCameraList();
+  refreshCameraControls();
   flipBtn.disabled = false;
   flipBtn.blur();  // so the next space press toggles the UI, not this button
   switchingCamera = false;
@@ -1239,7 +1286,7 @@ startBtn.addEventListener('click', async () => {
     // and resume Web Audio, which Safari often suspends at the same time.
     unlockIOSAudio();
     // permission is granted now, so the device list is finally readable
-    refreshCameraList();
+    refreshCameraControls();
 
     startOverlay.style.display = 'none';
     startBtn.blur(); // so the first space press toggles the UI, not this button
