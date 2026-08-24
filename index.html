@@ -27,6 +27,9 @@
     object-fit: cover;
     transform: scaleX(-1); /* mirror */
   }
+  /* the rear camera already faces the world, so mirroring it would reverse the
+     scene — the flip is only right for a front-facing camera */
+  body.back-camera video, body.back-camera canvas { transform: none; }
   video { visibility: hidden; }
   #dock {
     position: absolute;
@@ -41,7 +44,13 @@
     z-index: 15;
     pointer-events: none;
   }
-  #cycleBtn {
+  #dockBtns {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+  }
+  .dockBtn {
     pointer-events: auto;
     font-family: inherit;
     font-size: 12.5px;
@@ -56,7 +65,8 @@
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
   }
-  #cycleBtn:active { background: rgba(255,255,255,.16); }
+  .dockBtn:active { background: rgba(255,255,255,.16); }
+  .dockBtn:disabled { opacity: .5; }
   #rack {
     display: flex;
     flex-wrap: wrap;
@@ -193,7 +203,7 @@
     opacity: 0;
     pointer-events: none;
   }
-  body.chrome-hidden #cycleBtn { pointer-events: none; }
+  body.chrome-hidden .dockBtn { pointer-events: none; }
   .noteBadge {
     position: absolute;
     z-index: 10;
@@ -214,7 +224,10 @@
   <video id="video" playsinline webkit-playsinline muted autoplay></video>
   <canvas id="canvas"></canvas>
   <div id="dock">
-    <button id="cycleBtn" type="button">cycle pairs</button>
+    <div id="dockBtns">
+      <button id="cycleBtn" class="dockBtn" type="button">cycle pairs</button>
+      <button id="flipBtn" class="dockBtn" type="button" hidden>back camera</button>
+    </div>
     <div id="rack"></div>
   </div>
   <div id="hud">
@@ -238,6 +251,7 @@
 <script>
 const stage = document.getElementById('stage');
 const cycleBtn = document.getElementById('cycleBtn');
+const flipBtn = document.getElementById('flipBtn');
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx2d = canvas.getContext('2d');
@@ -665,10 +679,11 @@ function handTilt(landmarks) {
 // voice and the right hand the second, so a single player's two hands always
 // get the same two instruments in the same places.
 //
-// The screen is mirrored, so screen-left is the high end of the landmark x
-// range — hence the 1 - x here.
+// With the front camera the screen is mirrored, so screen-left is the high end
+// of the landmark x range — hence the flip. The rear camera draws unmirrored,
+// where landmark x already runs left to right on screen.
 function screenX(landmarks) {
-  return 1 - landmarks[0].x;
+  return mirrored ? 1 - landmarks[0].x : landmarks[0].x;
 }
 
 const PAIR_SETS = [
@@ -853,9 +868,10 @@ function onResults(results) {
     // name the instrument on the hand itself — with several hands on screen,
     // the rack alone doesn't tell a player which one is theirs.
     //
-    // The canvas element is CSS-mirrored, which is what makes the skeletons line
-    // up with the mirrored video. So raw landmark x is already correct here —
-    // pre-mirroring it would flip a second time and land on the wrong hand.
+    // With the front camera the canvas element is CSS-mirrored, which is what
+    // makes the skeletons line up with the mirrored video. Either way raw
+    // landmark x is already correct here — pre-mirroring it would flip a second
+    // time and land on the wrong hand.
     const wrist = h.landmarks[0];
     const px = wrist.x * canvas.width;
     const py = wrist.y * canvas.height;
@@ -869,7 +885,7 @@ function onResults(results) {
     // glyphs need the mirror undone locally, or the text renders backwards
     ctx2d.save();
     ctx2d.translate(px, py + 26);
-    ctx2d.scale(-1, 1);
+    if (mirrored) ctx2d.scale(-1, 1);
     ctx2d.fillText(inst.label.toUpperCase(), 0, 0);
     ctx2d.restore();
     if (h.track.flash > 0) {
@@ -1025,7 +1041,122 @@ hands.setOptions({
 });
 hands.onResults(onResults);
 
+// ------------------------------------------------------------------- camera
+// Phones have at least two cameras and the rear one is the interesting option:
+// point it at other people and their hands play the rack. The front camera is
+// mirrored (you watch yourself in a glass), the rear one is not — `mirrored`
+// carries that through to the CSS transform, the hand ordering and the labels.
 let camera = null;
+let facingMode = 'user';
+let mirrored = true;
+let switchingCamera = false;
+// camera_utils keeps its own requestAnimationFrame loop and older builds have
+// no stop(), so a replaced Camera can keep pumping frames at the same video
+// element. Only the newest generation may talk to MediaPipe — two loops feeding
+// one graph produce out-of-order timestamps.
+let frameToken = 0;
+
+function buildCamera() {
+  const token = ++frameToken;
+  return new Camera(video, {
+    onFrame: async () => {
+      if (token !== frameToken || !video.videoWidth) return;
+      await hands.send({ image: video });
+    },
+    width: 1280,
+    height: 720,
+    facingMode,
+  });
+}
+
+async function stopCamera() {
+  frameToken++;
+  if (camera && camera.stop) {
+    try { await camera.stop(); } catch (err) { /* older builds have no stop() */ }
+  }
+  camera = null;
+  const stream = video.srcObject;
+  if (stream && stream.getTracks) stream.getTracks().forEach((track) => track.stop());
+  video.srcObject = null;
+}
+
+// What the camera says it is, once it runs. Phones report 'user' or
+// 'environment'; plain webcams report nothing, and on those a facing switch
+// would do nothing at all.
+function currentFacing() {
+  const stream = video.srcObject;
+  const track = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+  const settings = track && track.getSettings ? track.getSettings() : null;
+  return settings ? settings.facingMode : undefined;
+}
+
+// A device with one camera, or one that has no notion of facing, gets no
+// button. The full device list only appears once the user has granted camera
+// permission, so this runs after start.
+async function refreshCameraList() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter((d) => d.kind === 'videoinput');
+    flipBtn.hidden = cams.length < 2 || !currentFacing();
+  } catch (err) { /* enumeration is best-effort */ }
+}
+
+function renderFlipBtn() {
+  flipBtn.textContent = facingMode === 'user' ? 'back camera' : 'front camera';
+}
+renderFlipBtn();
+
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', () => {
+    if (audioStarted) refreshCameraList();
+  });
+}
+
+async function useCamera(mode) {
+  await stopCamera();
+  facingMode = mode;
+  camera = buildCamera();
+  await camera.start();
+  // facingMode is a preference, not a promise — a device free to ignore it
+  // would leave the picture mirrored the wrong way, so trust the running track.
+  facingMode = currentFacing() || mode;
+  mirrored = facingMode !== 'environment';
+  document.body.classList.toggle('back-camera', !mirrored);
+  muteCameraVideo();
+  // a fresh getUserMedia puts iOS back on the call-style audio route
+  unlockIOSAudio();
+}
+
+// The new camera sees the scene from somewhere else entirely, so every wrist
+// jumps. Dropping the tracks means hands get fresh identities instead of being
+// matched across the cut.
+function resetHandTracking() {
+  tracked.length = 0;
+  handOrder = [];
+}
+
+flipBtn.addEventListener('click', async (e) => {
+  e.stopPropagation(); // the stage listener would hide the UI otherwise
+  if (switchingCamera || !audioStarted) return;
+  switchingCamera = true;
+  flipBtn.disabled = true;
+  const previous = facingMode;
+  const next = previous === 'user' ? 'environment' : 'user';
+  try {
+    await useCamera(next);
+    resetHandTracking();
+  } catch (err) {
+    // some devices reject the constraint outright — go back to what worked
+    try { await useCamera(previous); } catch (err2) { /* nothing left to do */ }
+    statusEl.textContent = 'camera switch failed';
+  }
+  renderFlipBtn();
+  refreshCameraList();
+  flipBtn.disabled = false;
+  flipBtn.blur();  // so the next space press toggles the UI, not this button
+  switchingCamera = false;
+});
 
 // iOS Safari: getUserMedia (even video-only) flips the audio session to
 // play-and-record, which routes Web Audio to the earpiece and also lets the
@@ -1084,13 +1215,7 @@ startBtn.addEventListener('click', async () => {
   startHint.textContent = 'Starting…';
   muteCameraVideo();
 
-  camera = new Camera(video, {
-    onFrame: async () => {
-      await hands.send({ image: video });
-    },
-    width: 1280,
-    height: 720,
-  });
+  camera = buildCamera();
 
   // iOS consumes a tap for getUserMedia / AudioContext. Both must be
   // kicked off in this turn — awaiting dummy audio first ate the gesture
@@ -1113,6 +1238,8 @@ startBtn.addEventListener('click', async () => {
     // getUserMedia just switched iOS back to a call-style route — undo that
     // and resume Web Audio, which Safari often suspends at the same time.
     unlockIOSAudio();
+    // permission is granted now, so the device list is finally readable
+    refreshCameraList();
 
     startOverlay.style.display = 'none';
     startBtn.blur(); // so the first space press toggles the UI, not this button
@@ -1148,10 +1275,10 @@ window.addEventListener('keydown', (e) => {
 });
 
 // The rack and the HUD are pointer-events: none, so a tap anywhere but the
-// cycle button lands here.
+// dock buttons lands here.
 stage.addEventListener('click', (e) => {
   if (!audioStarted) return;
-  if (e.target.closest('#cycleBtn')) return;
+  if (e.target.closest('.dockBtn')) return;
   toggleChrome();
 });
 
