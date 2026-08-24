@@ -310,11 +310,42 @@ const transport = Tone.getTransport();
 
 // ---------------------------------------------------------------- audio graph
 // Everything funnels into masterBus, then glue compression and a limiter. The
-// global filter/delay/reverb that used to sit here went away with the FX hand —
-// each voice now carries its own effects instead.
+// global filter/delay that used to sit here went away with the FX hand — each
+// voice carries its own effects now, apart from the two shared reverbs below.
 const limiter = new Tone.Limiter(-1).toDestination();
 const masterComp = new Tone.Compressor({ threshold: -18, ratio: 4 }).connect(limiter);
 const masterBus = new Tone.Gain().connect(masterComp);
+
+// ------------------------------------------------------------- reverb sends
+// Five voices used to carry a reverb each: 6, 8, 10, 12 and 15 seconds of
+// decay, 51 seconds of convolution in total. A ConvolverNode processes its tail
+// whether or not anything feeds it, so all five ran flat out from the first
+// note to the last, and a weak machine crackled under the fixed load.
+//
+// Two shared rooms replace them, fed by sends. Eighteen seconds of convolution
+// instead of fifty-one.
+//
+// Two rather than one, because the rooms do opposite jobs. `space` is the long
+// atmospheric tail behind the chords, the whale, the sonar and the shimmer,
+// which all sat between 8 and 15 seconds and now share 12. `lowRoom` is the
+// short dark room that turns the rumble into mud under the kick — its input is
+// already lowpassed at 170Hz, and a twelve-second sub tail would pile up and
+// swallow the low end that the whole track stands on.
+const spaceReverb = new Tone.Reverb({ decay: 12, preDelay: 0.05, wet: 1 }).connect(masterBus);
+const lowRoom = new Tone.Reverb({ decay: 6, preDelay: 0.02, wet: 0.9 }).connect(masterBus);
+
+// A send has to land at the level the voice's own reverb used to give it. Tone
+// crossfades `wet` with equal power rather than linearly, so these are the same
+// two gains the crossfade would have applied, and the mix is unchanged.
+function reverbSend(room, wet) {
+  const send = new Tone.Gain(Math.sin(wet * Math.PI / 2)).connect(room);
+  const dry = new Tone.Gain(Math.cos(wet * Math.PI / 2)).connect(masterBus);
+  // one node to plug a voice into: it fans out to the room and to the dry path
+  const input = new Tone.Gain();
+  input.connect(send);
+  input.connect(dry);
+  return input;
+}
 
 // drums share a filter so the drum hand's height can sweep the kit as a group
 const drumFilter = new Tone.Filter(9000, 'lowpass').connect(masterBus);
@@ -337,8 +368,8 @@ hihat.volume.value = -18;
 // The signature Berghain low end: a sub hit drowned in long reverb and lowpassed
 // hard, so what you hear is the rumbling tail rather than the transient. Routed
 // around drumFilter so the drum hand's height sweep can't choke the low end.
-const rumbleReverb = new Tone.Reverb({ decay: 6, preDelay: 0.02, wet: 0.9 }).connect(masterBus);
-const rumbleLowpass = new Tone.Filter(170, 'lowpass').connect(rumbleReverb);
+const rumbleSend = reverbSend(lowRoom, 0.9);
+const rumbleLowpass = new Tone.Filter(170, 'lowpass').connect(rumbleSend);
 const rumble = new Tone.MembraneSynth({
   pitchDecay: 0.09,
   octaves: 3,
@@ -384,8 +415,8 @@ melodySynth.volume.value = -10;
 // Chord pad — not stabs. Detuned saws through a slow chorus and a long, very
 // wet reverb put it far behind the drums, and the slow attack means it swells
 // rather than hits, so it reads as atmosphere instead of a rhythmic part.
-const chordReverb = new Tone.Reverb({ decay: 8, preDelay: 0.05, wet: 0.55 }).connect(masterBus);
-const chordFilter = new Tone.Filter({ frequency: 900, type: 'lowpass', Q: 1.5 }).connect(chordReverb);
+const chordSend = reverbSend(spaceReverb, 0.55);
+const chordFilter = new Tone.Filter({ frequency: 900, type: 'lowpass', Q: 1.5 }).connect(chordSend);
 const chordChorus = new Tone.Chorus({ frequency: 0.3, delayTime: 6, depth: 0.7, wet: 0.5 }).connect(chordFilter);
 const chordSynth = new Tone.PolySynth(Tone.Synth, {
   oscillator: { type: 'fatsawtooth', count: 3, spread: 40 },
@@ -397,8 +428,8 @@ chordSynth.volume.value = -24;
 // means every note bends into the next instead of stepping, which is what makes
 // a sine read as an animal rather than a test tone. Vibrato, a very slow chorus
 // and a 12-second reverb do the rest of the underwater work.
-const whaleReverb = new Tone.Reverb({ decay: 12, preDelay: 0.08, wet: 0.75 }).connect(masterBus);
-const whaleDelay = new Tone.FeedbackDelay({ delayTime: '4n.', feedback: 0.4, wet: 0.25 }).connect(whaleReverb);
+const whaleSend = reverbSend(spaceReverb, 0.75);
+const whaleDelay = new Tone.FeedbackDelay({ delayTime: '4n.', feedback: 0.4, wet: 0.25 }).connect(whaleSend);
 const whaleFilter = new Tone.Filter({ frequency: 900, type: 'lowpass', Q: 2 }).connect(whaleDelay);
 const whaleChorus = new Tone.Chorus({ frequency: 0.15, delayTime: 8, depth: 0.8, wet: 0.6 }).connect(whaleFilter);
 const whaleVibrato = new Tone.Vibrato({ frequency: 5.5, depth: 0.12 }).connect(whaleChorus);
@@ -447,8 +478,8 @@ const clave2 = new Tone.MetalSynth({
 clave2.volume.value = -34;
 
 // sonar: one sine blip thrown into an enormous reverb — the whole sound is tail
-const sonarReverb = new Tone.Reverb({ decay: 15, preDelay: 0.02, wet: 0.82 }).connect(masterBus);
-const sonarDelay = new Tone.FeedbackDelay({ delayTime: '2n', feedback: 0.5, wet: 0.35 }).connect(sonarReverb);
+const sonarSend = reverbSend(spaceReverb, 0.82);
+const sonarDelay = new Tone.FeedbackDelay({ delayTime: '2n', feedback: 0.5, wet: 0.35 }).connect(sonarSend);
 const sonar = new Tone.Synth({
   oscillator: { type: 'sine' },
   envelope: { attack: 0.004, decay: 0.35, sustain: 0, release: 0.5 },
@@ -461,10 +492,10 @@ const pluckFilter = new Tone.Filter(2200, 'lowpass').connect(pluckDelay);
 const pluck = new Tone.PluckSynth({ attackNoise: 1, dampening: 2600, resonance: 0.92 }).connect(pluckFilter);
 pluck.volume.value = -8;
 
-// shimmer pad: reverb whose feedback path is pitched up an octave, so the tail
-// keeps climbing instead of decaying flat
-const shimmerReverb = new Tone.Reverb({ decay: 10, preDelay: 0.04, wet: 0.7 }).connect(masterBus);
-const shimmerShift = new Tone.PitchShift({ pitch: 12, feedback: 0.35, wet: 0.5 }).connect(shimmerReverb);
+// shimmer pad: a pitch shifter feeding itself an octave up, so what reaches the
+// reverb keeps climbing instead of decaying flat
+const shimmerSend = reverbSend(spaceReverb, 0.7);
+const shimmerShift = new Tone.PitchShift({ pitch: 12, feedback: 0.35, wet: 0.5 }).connect(shimmerSend);
 const shimmerFilter = new Tone.Filter({ frequency: 1200, type: 'lowpass' }).connect(shimmerShift);
 const shimmerSynth = new Tone.PolySynth(Tone.Synth, {
   oscillator: { type: 'triangle' },
