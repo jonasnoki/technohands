@@ -149,6 +149,13 @@
     text-transform: uppercase;
     opacity: .85;
   }
+  /* the version rides with the title but must not read as part of the name */
+  #hud h1 .ver {
+    font-weight: 500;
+    letter-spacing: .02em;
+    text-transform: none;
+    opacity: .5;
+  }
   #hud p {
     margin: 0;
     font-size: 12.5px;
@@ -245,7 +252,8 @@
   </div>
   <div id="hud">
     <div>
-      <h1>technohands</h1>
+      <!-- bump this on every push, so a phone can be checked against the build -->
+      <h1>technohands <span class="ver">v1.0</span></h1>
       <p>Stand anywhere, raise a hand. Instruments stay fixed to hands: the first pair of hands on screen plays the first pair of voices below, the next pair the next, and so on left to right. A closed fist means silence. Press <strong>cycle pairs</strong> to deal the eight voices into new pairs. That also happens by itself every three minutes, and waits until no hands are up. One 132bpm clock, so nothing drifts out of time.</p>
       <p class="hudKey"><kbd>space</kbd> or a tap on the background &mdash; hide interface, hands keep playing</p>
     </div>
