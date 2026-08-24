@@ -199,14 +199,22 @@
     font-family: inherit;
     font-size: 11px;
   }
-  /* performance mode: everything fades but the video and the tracked hands */
+  /* Performance mode: the interface fades out and the hand overlay stops being
+     drawn, since it lives on the canvas rather than in the DOM.
+     visibility takes the faded interface out of the compositor as well. At
+     opacity 0 the browser still runs a backdrop-filter blur pass for every
+     button and every rack slot, over a canvas that repaints on each frame.
+     The visibility switch waits out the fade on the way down and fires at once
+     on the way up, so the transition still looks the same. */
   #hud, #dock {
-    transition: opacity .25s linear;
+    transition: opacity .25s linear, visibility 0s linear 0s;
   }
   body.chrome-hidden #hud,
   body.chrome-hidden #dock {
     opacity: 0;
+    visibility: hidden;
     pointer-events: none;
+    transition: opacity .25s linear, visibility 0s linear .25s;
   }
   body.chrome-hidden .dockBtn { pointer-events: none; }
   .noteBadge {
@@ -240,7 +248,7 @@
     <div>
       <h1>technohands</h1>
       <p>Stand anywhere, raise a hand. Instruments stay fixed to hands: the first pair of hands on screen plays the first pair of voices below, the next pair the next, and so on left to right. A closed fist means silence. Press <strong>cycle pairs</strong> to shift every pair to the next set of voices. One 132bpm clock, so nothing drifts out of time.</p>
-      <p class="hudKey"><kbd>space</kbd> or a tap on the background &mdash; hide interface</p>
+      <p class="hudKey"><kbd>space</kbd> or a tap on the background &mdash; bare camera, no interface and no hand overlay</p>
     </div>
     <div id="status">loading&hellip;</div>
   </div>
@@ -817,13 +825,24 @@ function renderPairs() {
 }
 renderPairs();
 
+// The rack changes a few times a second at most, but this runs on every frame
+// of the video. Each slot therefore remembers what it last wrote and touches
+// the DOM only on a real change — otherwise the browser recalculates styles
+// under the whole dock 60 times a second for nothing.
 function setInstrumentActive(id, active, stateText) {
   const s = rackEls[id];
+  if (s.wasActive === active && s.wasText === stateText) return;
+  s.wasActive = active;
+  s.wasText = stateText;
   const color = instrumentById[id].color;
   s.root.classList.toggle('active', active);
   s.root.style.borderColor = active ? color : '';
   s.state.textContent = active ? stateText : '—';
   s.state.style.color = active ? color : '';
+}
+
+function setText(el, text) {
+  if (el.textContent !== text) el.textContent = text;
 }
 
 function resize() {
@@ -838,6 +857,12 @@ let audioStarted = false;
 function onResults(results) {
   ctx2d.save();
   ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Performance mode drops every visual: no skeletons, no labels, no rings, and
+  // no rack or status updates either. Tracking, assignment and sound all run
+  // exactly as before — the work that disappears is only the drawing and the
+  // DOM writes that nobody can see.
+  const overlay = !document.body.classList.contains('chrome-hidden');
 
   const dets = [];
   if (results.multiHandLandmarks) {
@@ -858,7 +883,7 @@ function onResults(results) {
       h.track.instrument = id;
     }
   });
-  pairBoxes.forEach((box, i) => box.root.classList.toggle('live', i < pairsInUse));
+  if (overlay) pairBoxes.forEach((box, i) => box.root.classList.toggle('live', i < pairsInUse));
 
   // any number of hands can land on the same instrument — they're collected
   // per instrument and merged below rather than fighting over one slot
@@ -867,6 +892,12 @@ function onResults(results) {
   live.forEach((h) => byInst[h.track.instrument].push(h.landmarks));
 
   live.forEach((h) => {
+    if (!overlay) {
+      // the flash keeps decaying while nothing is drawn, or a ring would be
+      // sitting there waiting to fire the moment the overlay returns
+      h.track.flash = Math.max(0, h.track.flash - 0.06);
+      return;
+    }
     const inst = instrumentById[h.track.instrument];
     if (window.drawConnectors) {
       drawConnectors(ctx2d, h.landmarks, HAND_CONNECTIONS, { color: inst.color, lineWidth: 2 });
@@ -1025,16 +1056,21 @@ function onResults(results) {
   applyCall('whale', byInst.whale);
   applyCall('sonar', byInst.sonar);
 
+  ctx2d.restore();
+
+  // Nothing below this point makes sound. It is skipped outright while the
+  // interface is hidden, and rewritten from the next frame when it returns.
+  if (!overlay) return;
+
   INSTRUMENT_IDS.forEach((id) => {
     const extra = byInst[id].length > 1 ? ` +${byInst[id].length - 1}` : '';
     setInstrumentActive(id, byInst[id].length > 0, (stateText[id] || '') + extra);
   });
 
-  ctx2d.restore();
   const playing = INSTRUMENT_IDS.filter((id) => byInst[id].length > 0).length;
-  statusEl.textContent = live.length
+  setText(statusEl, live.length
     ? `${live.length} hand${live.length > 1 ? 's' : ''} · ${playing} instrument${playing > 1 ? 's' : ''} live`
-    : 'raise a hand to play';
+    : 'raise a hand to play');
 }
 
 const hands = new Hands({
