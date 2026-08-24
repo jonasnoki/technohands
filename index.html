@@ -253,7 +253,7 @@
   <div id="hud">
     <div>
       <!-- bump this on every push, so a phone can be checked against the build -->
-      <h1>technohands <span class="ver">v1.3</span></h1>
+      <h1>technohands <span class="ver">v1.4</span></h1>
       <p>Stand anywhere, raise a hand. Instruments stay fixed to hands: the first pair of hands on screen plays the first pair of voices below, the next pair the next, and so on left to right. A closed fist means silence. Turn one hand over, fingers spread and pointing down, and hold it: that hand alone steps to the next voice and keeps it. Press <strong>cycle pairs</strong> to deal all eight voices into new pairs and put every hand back on the map. That also happens by itself every three minutes, and waits until no hands are up. One 132bpm clock, so nothing drifts out of time.</p>
       <p class="hudKey"><kbd>space</kbd> or a tap on the background &mdash; hide interface, hands keep playing</p>
     </div>
@@ -511,6 +511,43 @@ const shimmerSynth = new Tone.PolySynth(Tone.Synth, {
 }).connect(shimmerFilter);
 shimmerSynth.volume.value = -20;
 
+// ------------------------------------------------------- two more atmospheres
+// Both feed the reverb that is already running rather than bringing rooms of
+// their own. Five convolvers were what made the weak machine crackle, and two
+// more would put it straight back there.
+
+// Drone — the only tonal voice that never stops to be retriggered. Three
+// detuned saws through a lowpass, gated by a slow gain rather than an envelope,
+// so it swells in and out like something being leaned on. A very slow LFO walks
+// the detune either side of centre, which keeps the beating between the three
+// saws moving and stops the bed from turning into a held organ chord.
+const droneSend = reverbSend(spaceReverb, 0.6);
+const droneFilter = new Tone.Filter({ frequency: 700, type: 'lowpass', Q: 1.2 }).connect(droneSend);
+const droneGain = new Tone.Gain(0).connect(droneFilter);
+const droneOsc = new Tone.FatOscillator({
+  type: 'sawtooth', frequency: 'C2', count: 3, spread: 22,
+}).connect(droneGain);
+droneOsc.volume.value = -8;
+const droneDrift = new Tone.LFO({ frequency: 0.045, min: -16, max: 16 }).connect(droneOsc.detune);
+
+// Chime — struck glass, high above everything else and drenched, so it reads as
+// a room rather than an instrument. FM with a short modulation envelope gives
+// the strike its bite and then leaves a clean sine to ring out for two seconds.
+// Polyphonic, because chimes overlap; capped at four voices, because a weak
+// machine is exactly what this rack has to survive.
+const chimeSend = reverbSend(spaceReverb, 0.85);
+const chimeFilter = new Tone.Filter({ frequency: 5000, type: 'lowpass' }).connect(chimeSend);
+const chime = new Tone.PolySynth(Tone.FMSynth, {
+  harmonicity: 3.01,
+  modulationIndex: 9,
+  oscillator: { type: 'sine' },
+  envelope: { attack: 0.002, decay: 2.4, sustain: 0, release: 1.6 },
+  modulation: { type: 'sine' },
+  modulationEnvelope: { attack: 0.004, decay: 0.5, sustain: 0, release: 0.4 },
+}).connect(chimeFilter);
+chime.maxPolyphony = 4;
+chime.volume.value = -11;   // metered against the sonar, which it sits beside
+
 // ------------------------------------------------------------------- patterns
 transport.bpm.value = 132;
 const SIXTEENTH = Tone.Time('16n').toSeconds();
@@ -607,6 +644,14 @@ const EUCLID_PATTERNS = {
 const SONAR_SPACING = [0, 32, 16, 8, 4, 2];
 const PLUCK_PATTERN = [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0];
 
+// Chime spacing, the same idea as the sonar. None of these divide the 32-step
+// cycle, so the strikes land on a different beat every two bars instead of
+// settling into a loop — which is the difference between a chime and a bell.
+const CHIME_SPACING = [0, 20, 14, 10, 6, 3];
+// high pentatonic, two octaves above the bass — the note is drawn at random on
+// every strike, so the chime never repeats a figure and never suggests a melody
+const CHIME_NOTES = ['C5', 'D#5', 'F5', 'G5', 'A#5', 'C6'];
+
 // --------------------------------------------------------------------- state
 // Every voice, keyed by id. The pair deal below decides which pair of hands gets
 // which two of these; this table only carries the label and the colour.
@@ -619,6 +664,8 @@ const INSTRUMENTS = [
   { id: 'shimmer', label: 'shimmer', color: '#dfe6e9' },
   { id: 'euclid', label: 'euclid', color: '#00cec9' },
   { id: 'pluck', label: 'pluck', color: '#fab1a0' },
+  { id: 'drone', label: 'drone', color: '#e17055' },
+  { id: 'chime', label: 'chime', color: '#fd79a8' },
 ];
 const INSTRUMENT_IDS = INSTRUMENTS.map((i) => i.id);
 const instrumentById = {};
@@ -636,6 +683,8 @@ const S = {
   shimmer: { degree: 0, active: false, wide: false },
   whale: { call: 0, active: false, transpose: 0 },
   sonar: { call: 0, active: false, transpose: 0 },
+  drone: { note: null, active: false },
+  chime: { call: 0, active: false, transpose: 0 },
 };
 
 const TRACK_LABELS = {
@@ -699,6 +748,17 @@ transport.scheduleRepeat((time) => {
   const spacing = SONAR_SPACING[S.sonar.call];
   if (S.sonar.active && spacing && cyclePos % spacing === 0) {
     sonar.triggerAttackRelease(Tone.Frequency('A4').transpose(S.sonar.transpose), '8n', time);
+  }
+
+  // The chime draws a fresh note and a fresh weight on every strike. A fixed
+  // note would turn into a riff at these spacings, and a fixed velocity would
+  // turn into a clock — the unevenness is the whole character.
+  const chimeGap = CHIME_SPACING[S.chime.call];
+  if (S.chime.active && chimeGap && cyclePos % chimeGap === 0) {
+    const note = CHIME_NOTES[Math.floor(Math.random() * CHIME_NOTES.length)];
+    chime.triggerAttackRelease(
+      Tone.Frequency(note).transpose(S.chime.transpose), '2n', time, 0.35 + Math.random() * 0.4,
+    );
   }
 
   step = (step + 1) % 16;
@@ -780,6 +840,7 @@ const OPENING_PAIRS = [
   ['whale', 'sonar'],
   ['chords', 'shimmer'],
   ['euclid', 'pluck'],
+  ['drone', 'chime'],
 ];
 
 // A cycle re-deals all eight voices into four new pairs rather than rotating a
@@ -810,12 +871,9 @@ function dealPairs() {
   const kits = shuffled(KIT_IDS);
   const rest = shuffled(INSTRUMENT_IDS.filter((id) => !KIT_IDS.includes(id)));
   // shuffle inside each pair too, so a kit is not always the left hand
-  return [
-    shuffled([kits[0], rest[0]]),
-    shuffled([kits[1], rest[1]]),
-    shuffled([rest[2], rest[3]]),
-    shuffled([rest[4], rest[5]]),
-  ];
+  const pairs = [shuffled([kits[0], rest[0]]), shuffled([kits[1], rest[1]])];
+  for (let i = 2; i + 1 < rest.length; i += 2) pairs.push(shuffled([rest[i], rest[i + 1]]));
+  return pairs;
 }
 
 function dealDifferentPairs() {
@@ -1316,6 +1374,54 @@ function onResults(results) {
   applyCall('whale', byInst.whale);
   applyCall('sonar', byInst.sonar);
 
+  // The drone is the one voice with nothing to trigger, so a fist cannot mean
+  // "play no note" — it has to mean "close the gate". Everything here is a ramp
+  // rather than a jump, and the pitch glides too, so a change of finger count
+  // bends the bed to a new note instead of cutting it and starting again.
+  function applyDrone(hands) {
+    const st = S.drone;
+    if (!hands.length) {
+      st.active = false;
+      if (audioStarted) droneGain.gain.linearRampTo(0, 1.5);
+      return;
+    }
+    const lm = hands[0];
+    const count = countExtended(fingerStates(lm));
+    const heightFrac = clamp(1 - lm[0].y, 0, 1);
+    st.active = count > 0;
+    st.note = SCALE[count];
+    if (audioStarted) {
+      if (count > 0) droneOsc.frequency.rampTo(Tone.Frequency(st.note).toFrequency(), 1.2);
+      droneGain.gain.linearRampTo(count > 0 ? 0.16 : 0, 1.5);
+      droneFilter.frequency.rampTo(mapRange(heightFrac, 0, 1, 200, 2400), 0.5);
+      // a spread hand opens the resonance, which brings the detuned saws forward
+      droneFilter.Q.rampTo(mapRange(polygonOpenness(lm), 0.1, 1.2, 0.8, 6), 0.4);
+    }
+    stateText.drone = count === 0 ? 'closed' : st.note;
+  }
+  applyDrone(byInst.drone);
+
+  function applyChime(hands) {
+    const st = S.chime;
+    if (!hands.length) { st.active = false; return; }
+    const lm = hands[0];
+    const count = countExtended(fingerStates(lm));
+    const heightFrac = clamp(1 - lm[0].y, 0, 1);
+    st.call = count;
+    st.active = count > 0;
+    // an octave either way, so the same chime can hang far below the pads or
+    // sit right up at the top of the room
+    st.transpose = Math.round(mapRange(heightFrac, 0, 1, -12, 12));
+    if (audioStarted) {
+      chimeFilter.frequency.rampTo(mapRange(heightFrac, 0, 1, 1400, 7000), 0.3);
+      // openness takes the strike from a pure glass tone to a struck metal one
+      chime.set({ modulationIndex: mapRange(polygonOpenness(lm), 0.1, 1.2, 3, 16) });
+    }
+    const sign = st.transpose >= 0 ? '+' : '';
+    stateText.chime = count === 0 ? 'silent' : `strike /${CHIME_SPACING[count]} ${sign}${st.transpose}`;
+  }
+  applyChime(byInst.chime);
+
   ctx2d.restore();
 
   // Nothing below this point makes sound. It is skipped outright while the
@@ -1616,6 +1722,8 @@ startBtn.addEventListener('click', async () => {
     atmosFilter.start();
     chordChorus.start();
     whaleChorus.start();
+    droneOsc.start();     // the drone runs from here to the end of the set,
+    droneDrift.start();   // held at zero gain until a hand opens it
     transport.start();
 
     await cameraReady;
