@@ -114,6 +114,13 @@
     transition: border-color .2s linear, background .2s linear, opacity .2s linear;
   }
   .slot.active { background: rgba(10,10,16,.82); opacity: 1; }
+  .slotHand {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .16em;
+    opacity: .35;
+    margin-bottom: 3px;
+  }
   .slotName {
     font-size: 11.5px;
     font-weight: 700;
@@ -253,7 +260,7 @@
   <div id="hud">
     <div>
       <!-- bump this on every push, so a phone can be checked against the build -->
-      <h1>technohands <span class="ver">v1.4</span></h1>
+      <h1>technohands <span class="ver">v1.5</span></h1>
       <p>Stand anywhere, raise a hand. Instruments stay fixed to hands: the first pair of hands on screen plays the first pair of voices below, the next pair the next, and so on left to right. A closed fist means silence. Turn one hand over, fingers spread and pointing down, and hold it: that hand alone steps to the next voice and keeps it. Press <strong>cycle pairs</strong> to deal all eight voices into new pairs and put every hand back on the map. That also happens by itself every three minutes, and waits until no hands are up. One 132bpm clock, so nothing drifts out of time.</p>
       <p class="hudKey"><kbd>space</kbd> or a tap on the background &mdash; hide interface, hands keep playing</p>
     </div>
@@ -889,11 +896,27 @@ function pairSet(pairIndex) {
   return pairSets[pairIndex % pairSets.length];
 }
 
-// A plain sort by x would let two hands held close together trade voices every
+// One side of the room's hands, in screen order, taking their side's voice out of
+// pair 1, pair 2, pair 3 in turn. `slot` picks the side: 0 is the left hand's
+// voice, 1 the right hand's.
+function assignSide(hands, slot) {
+  hands.forEach((h, i) => {
+    if (h.track.picked) return;
+    const id = pairSet(i)[slot];
+    if (h.track.instrument === id) return;
+    if (h.track.instrument !== null) h.track.flash = 1;
+    h.track.instrument = id;
+  });
+}
+
+// Hands are still ordered left to right, but the order no longer decides which
+// voice a hand plays — only which pair it belongs to, among the hands on its own
+// side of the body. So one player's two hands never cross in this list at all.
+//
+// A plain sort by x would let two hands held close together trade places every
 // other frame. So the order persists between frames instead: a new hand is
 // inserted where it belongs, and two hands only change places once one has
-// crossed clearly past the other. One person's two hands sit well under this
-// margin apart in normal playing, so their voices stay put.
+// crossed clearly past the other.
 const SWAP_MARGIN = 0.05;   // normalized frame units
 let handOrder = [];         // track ids, left to right on screen
 
@@ -1034,6 +1057,40 @@ function checkTurnover(live) {
   });
 }
 
+// ------------------------------------------------------------- left and right
+// A pair binds its two voices to a left hand and a right hand, not to two places
+// on the screen. Cross your arms and the voices stay where they are, because
+// each hand carries its own side with it. Reach across the player beside you and
+// the same holds.
+//
+// MediaPipe labels every detection Left or Right, and that label describes the
+// hand as it sits in the raw camera frame. The frames the tracker reads are raw
+// for both cameras — the front-camera mirror is a CSS transform on the video and
+// the canvas, applied after the fact — and in a raw front-camera frame your right
+// hand is on the left. The label therefore arrives reversed, and the same swap
+// serves both cameras. If a session ever reads with the sides exchanged, this one
+// constant is the whole of it.
+const LABEL_IS_MIRRORED = true;
+
+// The classifier is not perfect, and a hand that rotates can flip its label for a
+// frame or two — the turnover, which points the fingers at the floor, most of
+// all. A flip would throw the voice across the pair and back. So the label is
+// never read directly: each hand keeps a running lean toward one side, and only a
+// run of contrary frames carries it over. A new hand takes its first label whole,
+// so it lands on the correct side on the frame it appears.
+const SIDE_TRUST = 0.08;   // weight of a single frame's label
+
+// +1 is the player's right hand, -1 their left, scaled by how sure the
+// classifier is — an uncertain label moves the lean less than a confident one.
+function sideVote(det) {
+  const right = (det.label === 'Right') !== LABEL_IS_MIRRORED;
+  return (right ? 1 : -1) * det.score;
+}
+
+function isRightHand(track) {
+  return track.sideLean > 0;
+}
+
 // -------------------------------------------------------------- hand tracking
 // MediaPipe gives no stable hand IDs and reorders its results between frames,
 // so per-hand state needs identity of our own. Nearest-wrist matching is enough
@@ -1066,12 +1123,13 @@ function matchHands(dets) {
       // turn fields are per hand, so several players can turn over at once.
       t = {
         id: nextHandId++, instrument: null, flash: 0, x: wx, y: wy, missing: 0,
-        picked: false, turnSince: 0, turnArmed: true,
+        picked: false, turnSince: 0, turnArmed: true, sideLean: sideVote(det),
       };
       tracked.push(t);
       used.push(true);
     }
     t.x = wx; t.y = wy; t.missing = 0;
+    t.sideLean = t.sideLean * (1 - SIDE_TRUST) + SIDE_TRUST * sideVote(det);
     out.push({ ...det, track: t });
   });
   for (let i = tracked.length - 1; i >= 0; i--) {
@@ -1087,7 +1145,9 @@ function trackedFlags() {
 }
 
 // ------------------------------------------------------------------ rack view
-// One box per pair of hands, left to right, holding that pair's two voices.
+// One box per pair of hands, holding that pair's two voices: the left hand's on
+// the left, the right hand's on the right, marked L and R since with the rear
+// camera the picture is not mirrored and the sides read reversed on screen.
 // Cycling moves the slot elements between the boxes, so the rack always reads
 // as the current map rather than as a fixed list.
 const rackEl = document.getElementById('rack');
@@ -1095,8 +1155,12 @@ const rackEls = {};
 INSTRUMENTS.forEach((inst) => {
   const el = document.createElement('div');
   el.className = 'slot';
-  el.innerHTML = `<div class="slotName">${inst.label}</div><div class="slotState">&mdash;</div>`;
-  rackEls[inst.id] = { root: el, state: el.querySelector('.slotState') };
+  el.innerHTML = `<div class="slotHand"></div><div class="slotName">${inst.label}</div><div class="slotState">&mdash;</div>`;
+  rackEls[inst.id] = {
+    root: el,
+    hand: el.querySelector('.slotHand'),
+    state: el.querySelector('.slotState'),
+  };
 });
 
 const pairBoxes = OPENING_PAIRS.map((_, i) => {
@@ -1109,7 +1173,10 @@ const pairBoxes = OPENING_PAIRS.map((_, i) => {
 
 function renderPairs() {
   pairBoxes.forEach((box, i) => {
-    pairSet(i).forEach((id) => box.slots.appendChild(rackEls[id].root));
+    pairSet(i).forEach((id, slot) => {
+      rackEls[id].hand.textContent = slot === 0 ? 'L' : 'R';
+      box.slots.appendChild(rackEls[id].root);
+    });
   });
 }
 renderPairs();
@@ -1174,7 +1241,11 @@ function onResults(results) {
   if (results.multiHandLandmarks) {
     results.multiHandLandmarks.forEach((landmarks, i) => {
       const handedness = results.multiHandedness && results.multiHandedness[i];
-      dets.push({ landmarks, score: handedness ? handedness.score : 1 });
+      dets.push({
+        landmarks,
+        score: handedness ? handedness.score : 1,
+        label: handedness ? handedness.label : 'Left',
+      });
     });
   }
 
@@ -1190,23 +1261,21 @@ function onResults(results) {
   // hold on this very frame.
   if (!tracked.length && performance.now() - lastCycleAt > AUTO_CYCLE_MS) cyclePairs();
 
-  // Assign by screen position: left to right, two hands per pair. A hand that
-  // moves past another swaps voices with it, which is the only way an
-  // assignment ever changes apart from a deal or a turnover.
+  // Assign by which hand it is. Every pair holds a left-hand voice and a
+  // right-hand voice; the first left hand and the first right hand take the first
+  // pair, the second of each take the second, and so on. Two players therefore
+  // get a pair each rather than one voice each, and nothing an arm does — crossing
+  // over, reaching across the room — moves a voice to another hand.
   //
   // A hand that turned over keeps what it picked, but still holds its place in
   // the order. Its neighbours therefore keep the voices they had, instead of
-  // every hand to its right shifting along one.
+  // every hand beyond it shifting along one.
   const ordered = orderHands(live);
-  const pairsInUse = Math.ceil(ordered.length / 2);
-  ordered.forEach((h, i) => {
-    if (h.track.picked) return;
-    const id = pairSet(Math.floor(i / 2))[i % 2];
-    if (h.track.instrument !== id) {
-      if (h.track.instrument !== null) h.track.flash = 1;
-      h.track.instrument = id;
-    }
-  });
+  const lefts = ordered.filter((h) => !isRightHand(h.track));
+  const rights = ordered.filter((h) => isRightHand(h.track));
+  const pairsInUse = Math.max(lefts.length, rights.length);
+  assignSide(lefts, 0);
+  assignSide(rights, 1);
   if (interfaceVisible) pairBoxes.forEach((box, i) => box.root.classList.toggle('live', i < pairsInUse));
 
   // any number of hands can land on the same instrument — they're collected
